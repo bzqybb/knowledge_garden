@@ -1,0 +1,4 @@
+-r requirements.txt
+langchain-huggingface>=1.0,<2
+sentence-transformers>=3.0,<6
+faiss-cpu>=1.9,<2

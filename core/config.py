@@ -1,0 +1,43 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = ROOT / "data"
+RUNTIME_DIR = DATA_DIR / "runtime"
+DB_PATH = RUNTIME_DIR / "garden.db"
+SAVED_API_KEY_PATH = RUNTIME_DIR / "garden-api-key.dpapi"
+WEB_DIR = ROOT / "web"
+
+
+@dataclass(frozen=True)
+class LLMConfig:
+    api_key: str
+    base_url: str
+    model: str
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key)
+
+
+def llm_config() -> LLMConfig:
+    """Prefer a session key, then decrypt the current-user DPAPI credential in memory."""
+    api_key = os.getenv("GARDEN_API_KEY", "").strip()
+    saved_key_allowed = os.getenv("GARDEN_DISABLE_SAVED_API_KEY", "").strip() != "1"
+    if not api_key and saved_key_allowed and SAVED_API_KEY_PATH.is_file():
+        from core.credentials import load_secret
+
+        api_key = load_secret(SAVED_API_KEY_PATH).strip()
+    return LLMConfig(
+        api_key=api_key,
+        base_url=os.getenv("GARDEN_BASE_URL", "https://api.deepseek.com").rstrip("/"),
+        model=os.getenv("GARDEN_MODEL", "deepseek-v4-flash").strip(),
+    )
+
+
+def ensure_runtime_dirs() -> None:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)

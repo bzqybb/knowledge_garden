@@ -1,0 +1,184 @@
+# 知识花园智能体
+
+一个以 Obsidian 为长期记忆、兼顾专业学习和兴趣探索的本地优先知识智能体。它会把教材、课程笔记、关注源更新和随手收藏连接成可复习、可追问、可生长的知识网络。
+
+## Agent 的地位
+
+知识园丁不是页面上的附加生成按钮，而是系统的持续控制循环：观察 `raw/` 与网页输入，编译可学习的 Wiki，维护学科思维导图，主动提出下一步和复习问题，根据回答调整间隔，并把确认后的新推导写回 Obsidian。界面负责呈现与接受选择，Agent 负责持续观察、教学和改写知识结构。
+
+核心闭环：
+
+`观察 → 理解与编译 → 学科嫁接 → 主动提问 → 检查理解 → 安排复习 → 写回`
+
+概念页不得是空占位，至少包含定义、机制、来源证据、例子、边界、关联和问题。详细运行协议由 Agent 自动维护在 Vault 的 `AGENTS.md` 管理区块中。
+
+### 统一上下文与分层记忆
+
+当前架构遵循一条明确原则：借 ECNUClaw 的教育观察维度，但不借“关键词即画像”；借 DeepTutor 的证据链和分层记忆，但保持 Obsidian 知识生长这一独特核心。
+
+系统中的数据分为四层，不能混装：
+
+- `GardenContext`：一次请求开始前已经确定的只读事实，例如当前消息、显式学习设置、知识范围和工具权限。
+- `GardenerState`：多 Agent 在本次 LangGraph 运行中传递的诊断、检索结果、证据审查和教学策略；它不是长期记忆。
+- `Memory`：跨会话的用户相关判断。观察先进入 L1 事件，只有带证据、置信度、范围和生命周期的声明才能进入 L2/L3。
+- `Knowledge`：Obsidian 中可阅读、可修订、可双链的知识资产。数据库记录 Agent 的过程证据，不取代 Markdown 知识库。
+
+新增学习与记忆地基由 9 张表组成：
+
+| 责任 | 表 | 作用 |
+| --- | --- | --- |
+| 迁移 | `schema_migrations` | 记录版本与校验和，禁止悄悄改写已应用结构 |
+| 会话 | `sessions`、`session_messages` | 保存会话边界和真实消息 |
+| L1 观察 | `learning_events`、`event_concepts` | 保存可追溯的教育观察及其概念范围，不直接形成画像 |
+| L2/L3 记忆 | `memory_claims`、`memory_claim_evidence` | 保存可支持、反驳、替代和过期的长期判断 |
+| 概念学习 | `concept_mastery`、`concept_mastery_evidence` | 单独保存从接触到迁移的概念掌握阶段及依据 |
+
+因此，诸如“用户这次说了‘画出来’，所以永远是视觉型学习者”的写法不被允许。关键词只能协助生成候选学习事件，记忆 Agent 必须结合多次证据或用户明确确认后，才能激活有范围的长期声明。
+
+### 经验—反思—优化闭环
+
+问园丁使用稳定 `session_id` 保存真实对话。每轮先由只读 `ContextBuilder` 生成 `GardenContext`，意图 Agent 完成当前问题分析后，记忆节点才按概念与场景召回仍然有效的经验声明。回答结束会记录问题类型、教学动作、证据是否充分、质量审查结果和实际调用的知识节点。
+
+后台 `memory-patrol` 默认每 30 分钟执行一次不调用 LLM 的反思与衰减计算，可用 `GARDEN_MEMORY_INTERVAL_MINUTES` 调整。L1 到 L2/L3 的当前门槛是：
+
+- 用户明确确认的偏好可以直接成为高置信度、有范围的 L2。
+- 普通观察至少重复 3 次才成为 L2 候选；至少 5 条证据、跨 2 个会话才会激活。
+- L3 仅允许安全维度，并要求同一模式跨 3 个场景、累计至少 8 条证据；单次关键词、情绪或措辞不能生成 L3。
+- L2/L3 检索使用随时间衰减的有效置信度；原始声明、证据和原始置信度保留，便于反驳与修订。
+
+可通过 `GET /api/memory` 检查经验声明、知识活跃度与概念掌握，通过 `POST /api/memory/reflect` 手动触发一次反思。
+
+### 知识演化与认知状态
+
+知识节点具有基础重要度、调用次数、最后调用时间、稳定度和活跃度。检索相关性仍是第一门槛，活跃度只在相关结果之间调整次序。当前保持率使用透明近似 `R(t)=e^(-t/S)`，其中稳定度 `S` 会根据复习结果变化；低活跃节点只进入压缩候选，不会被自动删除、隐藏或改写 Obsidian。
+
+概念掌握不是“会/不会”二元值，而是四个独立分量：识别、解释、应用、迁移。系统同时保存未经衰减的原始证据和按时间估计的有效分数。解释证据达到门槛而迁移尚未验证时，会创建一次费曼复述任务；普通选择题不会被误认为已经证明迁移能力。
+
+这套认知状态借鉴 AEGIS 对 epistemic state、belief state、retention、teaching policy 和 metacognition 的拆分，但不采用“几条消息就固定学习风格 DNA”的做法。可能的误解、自我判断和教学偏好必须作为有作用范围、可反驳的经验声明存在。
+
+知识写回使用更严格的权限边界：经验反思可以自动形成候选声明，事实性 Markdown 写回仍需经过主张拆分、证据分级、实体消歧、变更预览和用户确认。后续将以独立 `WritebackGraph` 取代当前单体保存函数。
+
+## 现在能做什么
+
+- 同步任意 Obsidian Vault，识别双向链接、标签和笔记类型
+- 导入 PDF 教材，按页建立本地检索索引
+- 订阅技术博主的 RSS/Atom 源并抓取新文章摘要
+- 服务运行时每 60 分钟主动巡视关注源，新内容自动进入“前沿待嫁接”任务（可由 `GARDEN_FEED_INTERVAL_MINUTES` 调整）
+- 从前沿材料提取概念，生成“教材—前沿”对照卡、思考题和小测
+- 保存兴趣碎片，发现它与教材/课程/前沿节点之间的隐藏联系
+- 自动生成复习任务、经验值、知识图谱和学习周报
+- 复习必须实际作答：选择题自动判分，开放题由 LangChain 导师或自评反馈，并按掌握度安排 1～90 天后的下一次复习
+- 以跨学科知识 Map 为主界面：专业主干、兴趣枝条、前沿新芽共同生长
+- PDF 页仅作为后台检索证据；Map 展示“学科 → 分支 → 学习方向”，不会铺满“讲义名 + 页码”节点
+- 每条 AI 跨域连接都展示证据与置信度，由用户接受或驳回，而不是把联想冒充事实
+- 将生成的卡片与兴趣探索写回 Obsidian 的 `wiki/02-降维对照/`、`wiki/03-交叉火花/`
+- 网页输入的前沿正文自动写入 Vault 的 `raw/`；生成卡片和交叉火花写入对应 `wiki/` 分区
+- 后台监视 Obsidian Markdown 的新增、修改和删除，默认约 8 秒内同步到花园 Map
+- 未配置大模型时仍可离线使用；配置兼容 API 后启用更自然的讲解
+- 通过 TraceMemo Local HTTP API 按需读取微信历史：先预览与逐条删选，只建立 L1 候选；用户确认后才进入 Obsidian 与知识编译
+
+### 微信苗圃：TraceMemo 只读接入
+
+知识花园内置了项目级 Reader 协议，不依赖开发电脑上的 Codex Skill。TraceMemo 负责连接微信数据库，知识花园只调用其默认监听在 `127.0.0.1` 的 HTTP API；代码会拒绝公网地址，且不会读取或保存微信数据库密钥。
+
+1. 启动 TraceMemo、连接自己的微信数据，在 API Center 确认服务与数据库正常。
+2. 打开知识花园左侧“微信苗圃”，粘贴 API Center 的 Bearer Token，点击“连接并验证”。
+3. 默认勾选 Windows DPAPI 安全保存。Token 不进入 SQLite、Obsidian、前端状态或代码仓库，以后无需重复输入。
+4. 输入联系人/群聊与日期。园丁按 `current_time → resolve → chatlog` 的 Reader Skill 顺序查询并显示本地预览。
+5. 逐条勾选真正相关的消息，建立 L1 待审核候选。此时不会改变掌握度、L2/L3 画像或知识图谱。
+6. 在待审核区确认后，所选片段才会以“聊天陈述待事实核验”的边界写入 `raw/`，继而执行 Ingest；拒绝则不进入 Obsidian。
+
+Token 也可临时通过 `TRACEMEMO_API_TOKEN` 环境变量提供，地址可由 `TRACEMEMO_BASE_URL` 调整，但仅允许 `127.0.0.1`、`localhost` 或 `::1`。TraceMemo 目前没有对外实时入站 webhook，因此本阶段实现的是历史数据按需读取，不是后台监听或自动抓取全部聊天。
+
+## 快速开始
+
+需要 Python 3.10 以上。项目使用 LangChain 1.x 组织提示词、OpenAI-compatible 模型与结构化输出链。
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe app.py
+```
+
+浏览器打开 <http://127.0.0.1:8765>。首次使用依次完成：
+
+1. 在“设置”填入你的 Obsidian Vault 路径，点击“保存并同步”。
+2. 点击“导入项目教材”，将 `data/textbook_kb` 下的 PDF 加入本地索引。
+3. 在“前沿雷达”粘贴文章摘要，或添加博主 RSS 后刷新。
+4. 在“灵感温室”记录碎片知识，观察它自动连接到专业节点。
+
+知识 Map 中，实线代表已确认关系，虚线代表 AI 提议的候选关系。点开节点即可查看连接依据并“接受/驳回”；这一步先记录为 L1 反馈证据，不会因一次选择直接变成长期偏好。
+
+## Obsidian 笔记分类
+
+智能体会读取 frontmatter 中的 `garden_type` / `type`、标签和文件夹名。建议使用以下类型：
+
+```markdown
+---
+garden_type: textbook  # textbook / course / frontier / interest
+tags: [线性代数, 教材]
+---
+```
+
+不标注时默认视为兴趣笔记。原 Vault 内容只读取；智能体生成的内容集中写入 `知识花园/`，便于检查与删除。
+
+## 启用个性化大模型讲解
+
+推荐使用“一次输入、以后自动连接”的 Windows 安全保存方式。第一次运行：
+
+```powershell
+.\run.ps1 -SaveApiKey
+```
+
+不想使用命令行时，可以直接双击项目目录中的 `首次配置理解API.cmd`；以后双击 `启动知识花园.cmd` 即可。两个入口会绕过只针对本项目脚本的 PowerShell 执行限制。
+
+在隐藏输入框中粘贴 DeepSeek API Key 并回车。密钥会由 Windows DPAPI 加密，只能由当前 Windows 用户在这台电脑上解密。以后启动只需：
+
+```powershell
+.\run.ps1
+```
+
+需要替换密钥时再次运行 `.\run.ps1 -SaveApiKey`；需要删除本机保存的密钥时运行：
+
+```powershell
+.\run.ps1 -ForgetSavedApiKey
+```
+
+加密内容保存在 `data/runtime/garden-api-key.dpapi`，该目录已被 Git 忽略。明文只会在知识花园运行期间进入当前进程内存，服务停止后自动清除，不会写入数据库、网页、Obsidian 或源码。
+
+如果只想临时使用一次、不保存，可以运行：
+
+```powershell
+.\run.ps1 -AskForApiKey
+```
+
+也可以自行通过环境变量启动：
+
+```powershell
+$env:GARDEN_API_KEY="你的密钥"
+$env:GARDEN_BASE_URL="https://api.deepseek.com"
+$env:GARDEN_MODEL="deepseek-v4-flash"
+python app.py
+```
+
+也支持其他 OpenAI-compatible 服务。配置模型后，核心生成路径是 LangChain LCEL 的 `ChatPromptTemplate → ChatOpenAI → JsonOutputParser`；若不设置密钥，系统会使用可解释的本地规则生成基础卡片。
+
+项目默认使用轻量本地检索，适合现场演示和普通电脑。如果需要继续使用原型中的 BGE + FAISS 向量索引，可另装可选依赖：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-vector.txt
+```
+
+## 数据与隐私
+
+- 索引和成长状态保存在 `data/runtime/garden.db`。
+- 选择安全保存时，API Key 由 Windows DPAPI 加密后保存在 `data/runtime/garden-api-key.dpapi`；它与当前 Windows 用户和本机绑定。
+- 默认只监听 `127.0.0.1`，不会暴露到局域网。
+- 只有在配置大模型或刷新 RSS 时才会发起网络请求。
+- 请勿把 API Key 写进源码；如曾提交或分享过密钥，请立即在服务商控制台撤销并重新生成。
+
+## 测试
+
+```powershell
+python -m unittest discover -s tests -v
+```

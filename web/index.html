@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#183c2d">
+  <title>知识花园 · Knowledge Garden</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">芽</span><div><strong>知识花园</strong><small>Knowledge Garden</small></div></div>
+      <nav>
+        <button class="nav active" data-view="home"><span>⌂</span> 今日花园</button>
+        <button class="nav" data-view="frontier"><span>⌁</span> 前沿雷达</button>
+        <button class="nav" data-view="garden"><span>✣</span> 知识树</button>
+        <button class="nav" data-view="capture"><span>✎</span> 灵感温室</button>
+        <button class="nav" data-view="wechat"><span aria-hidden="true">✉</span> 微信苗圃</button>
+        <button class="nav" data-view="settings"><span>⚙</span> 设置</button>
+      </nav>
+      <div class="side-card">
+        <div class="tiny-label">花园等级</div>
+        <div class="level-row"><b id="side-level">Lv.1</b><span id="side-xp">0 / 100 XP</span></div>
+        <div class="progress"><i id="side-progress"></i></div>
+        <p id="garden-encourage">每一次好奇，都会长出新枝。</p>
+      </div>
+      <div class="sync-state"><i id="sync-dot"></i><span id="sync-label">本地花园</span></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow" id="today-label">KNOWLEDGE IN BLOOM</p><h1 id="page-title">早上好，园丁</h1></div>
+        <div class="header-actions"><span class="privacy">◉ 本地优先</span><button class="icon-btn" id="refresh-all" title="刷新">↻</button></div>
+      </header>
+
+      <section class="view active" id="view-home">
+        <div class="hero">
+          <div class="hero-copy"><span class="season">本周生长建议</span><h2 id="hero-title">让一条新知识<br>在旧土壤里扎根</h2><p id="hero-text">先同步你的 Obsidian，知识园丁会从已有笔记里发现可以继续生长的方向。</p><button class="primary" data-go="frontier">种下一颗前沿种子 <span>→</span></button></div>
+          <div class="plant-art" aria-hidden="true"><div class="sun"></div><div class="leaf l1"></div><div class="leaf l2"></div><div class="leaf l3"></div><div class="leaf l4"></div><div class="stem"></div><div class="pot"><span></span></div></div>
+        </div>
+
+        <article class="panel agent-console">
+          <div class="agent-avatar">芽</div>
+          <div class="agent-main">
+            <div class="agent-head"><div><span class="kicker">PROACTIVE KNOWLEDGE GARDENER</span><h3>知识园丁正在巡视</h3></div><span id="agent-status" class="status-badge on">巡视中</span></div>
+            <p id="agent-observation" class="agent-observation">正在读取你的知识状态……</p>
+            <p id="agent-action" class="agent-action"></p>
+            <div class="agent-question"><small>园丁主动发问</small><b id="agent-question">正在准备一道与你当前知识有关的问题。</b><button id="agent-review" class="secondary" type="button">回答这道题</button></div>
+            <form id="agent-ask-form" class="agent-ask"><input id="agent-ask-input" placeholder="也可以直接问园丁：这个概念为什么成立？它和什么容易混淆？" required><button class="primary" type="submit">问园丁</button></form>
+            <div id="agent-answer" class="agent-answer"></div>
+          </div>
+        </article>
+
+        <div class="metrics">
+          <article><span class="metric-icon green">✦</span><div><small>知识节点</small><strong id="m-notes">0</strong></div><em>持续积累</em></article>
+          <article><span class="metric-icon gold">❀</span><div><small>绽放概念</small><strong id="m-concepts">0</strong></div><em>教材 × 前沿</em></article>
+          <article><span class="metric-icon blue">✓</span><div><small>完成任务</small><strong id="m-completed">0</strong></div><em>主动回忆</em></article>
+          <article><span class="metric-icon coral">⌁</span><div><small>隐藏连接</small><strong id="m-links">0</strong></div><em>跨域灵感</em></article>
+        </div>
+
+        <div class="dashboard-grid">
+          <article class="panel tasks-panel"><div class="panel-head"><div><span class="kicker">TODAY</span><h3>今日浇灌</h3></div><button class="text-btn" data-go="garden">查看全部 →</button></div><div id="task-list" class="task-list"></div></article>
+          <article class="panel report-panel"><div class="panel-head"><div><span class="kicker">WEEKLY LETTER</span><h3 id="report-title">学习周报</h3></div><span class="stamp">Garden<br>Post</span></div><blockquote id="report-insight">你的花园正在准备发芽。</blockquote><div id="report-concepts" class="chips"></div><div class="report-foot"><span id="report-done">本周完成 0 项</span><button class="text-btn" id="copy-report">复制周报</button></div></article>
+        </div>
+
+        <article class="panel cards-panel"><div class="panel-head"><div><span class="kicker">NEW BLOOMS</span><h3>最近绽放的对照卡</h3></div><button class="text-btn" data-go="frontier">生成新卡片 →</button></div><div id="recent-cards" class="card-row"></div></article>
+        <article class="panel daily-panel"><div class="panel-head"><div><span class="kicker">DAILY GARDEN POST</span><h3>根据学习画像为你巡视</h3><small id="daily-profile">正在读取兴趣与学习水平……</small></div><button class="text-btn" id="refresh-daily">换一批 →</button></div><div id="daily-digest" class="daily-grid"><div class="empty">园丁正在准备今天的知识推送。</div></div></article>
+      </section>
+
+      <section class="view" id="view-frontier">
+        <div class="section-intro"><div><span class="kicker">FRONTIER RADAR</span><h2>把时代的新枝，嫁接到教材的根上</h2><p>粘贴博主解读、论文摘要或课程外材料。园丁会按你的水平提炼概念，并生成教材—前沿对照卡。</p></div></div>
+        <div class="two-col">
+          <form class="panel form-panel" id="analyze-form">
+            <label>材料标题<input id="frontier-title" placeholder="例如：为什么 Transformer 需要注意力机制" required></label>
+            <label>来源链接（可选）<input id="frontier-url" type="url" placeholder="https://..."></label>
+            <label>摘要或正文<textarea id="frontier-text" rows="11" placeholder="粘贴你想真正读懂的内容……" required></textarea></label>
+            <button class="primary wide" type="submit">提炼概念并生成对照卡 <span>✦</span></button>
+          </form>
+          <div>
+            <article class="panel feed-panel"><div class="panel-head"><div><span class="kicker">FOLLOWING</span><h3>博主追踪</h3></div><button id="refresh-feeds" class="text-btn">刷新全部</button></div><form id="feed-form" class="inline-form"><input id="feed-name" placeholder="博主名称" required><input id="feed-url" type="url" placeholder="RSS / Atom 地址" required><button>＋</button></form><div id="feed-list" class="feed-list"></div></article>
+            <article class="panel source-panel"><div class="panel-head"><div><span class="kicker">LATEST</span><h3>最新前沿种子</h3></div></div><div id="frontier-notes" class="source-list"></div></article>
+          </div>
+        </div>
+        <div id="analysis-result" class="analysis-result"></div>
+      </section>
+
+      <section class="view" id="view-garden">
+        <div class="section-intro graph-intro"><div><span class="kicker">YOUR CROSS-DISCIPLINARY MIND MAP</span><h2>我的知识花园：从学科底层向外生长</h2><p>统一结构为“学科 → 分支 → 方向 → 已学知识点”。问题、任务、讲义名和页码不进入主图；候选跨学科联系由你决定是否显示。</p></div><div class="map-controls"><label><input id="show-cross-links" type="checkbox"> 显示候选虚线</label><button id="rebuild-links" class="secondary" title="你主动点击后，园丁会使用已连接的理解 API 复核概念角色、父子层级和跨域关系">重新整理结构与连接</button></div></div>
+        <article class="panel graph-panel"><div class="legend"><span>中心：我的知识花园</span><span>粗枝：学科</span><span>细枝：分支与方向</span><span>叶片：已学知识点</span><span>实线跨域：已确认</span><span>┄ 虚线：待确认</span></div><svg id="knowledge-graph" role="img" aria-label="跨学科知识思维导图"></svg><div id="node-detail" class="node-detail">点击知识点，查看你学到的内容和来源依据。</div></article>
+        <div class="two-col lower"><article class="panel"><div class="panel-head"><div><span class="kicker">REVIEW</span><h3>复习任务</h3></div></div><div id="all-tasks" class="task-list"></div></article><article class="panel"><div class="panel-head"><div><span class="kicker">BRIDGE CARDS</span><h3>教材—前沿卡片</h3></div></div><div id="all-cards" class="stack-cards"></div></article></div>
+      </section>
+
+      <section class="view" id="view-capture">
+        <div class="capture-layout">
+          <div class="section-intro"><div><span class="kicker">IDEA GREENHOUSE</span><h2>不必整理好，先把好奇留下来</h2><p>一段话、一个问题、一张随手记都可以。园丁会寻找它与现有专业知识之间的同构关系，并用追问帮它继续发芽。</p></div></div>
+          <form class="panel capture-card" id="capture-form"><div class="paper-pin">✦</div><label>给这颗种子起个名字<input id="capture-title" placeholder="例如：为什么好故事总有节奏？" required></label><label>写下想探索的直觉<textarea id="capture-content" rows="10" placeholder="可以模糊、奇怪或尚未证实；第一次提交只开启对话，不会自动写入知识库……" required></textarea></label><label>标签，用逗号分隔<input id="capture-tags" placeholder="叙事, 音乐, 好奇"></label><button class="primary wide" type="submit">开始自由探索 <span>→</span></button></form>
+        </div>
+        <div id="capture-result"></div>
+      </section>
+
+      <section class="view" id="view-wechat">
+        <div class="section-intro"><div><span class="kicker">LOCAL WECHAT NURSERY</span><h2>微信苗圃：只把你选择的片段带进花园</h2><p>TraceMemo 负责在本机读取；知识园丁只接收本次查询命中的片段。先预览和删选，建立 L1 候选，再由你决定是否编译进 Obsidian。</p></div><span id="wechat-main-badge" class="status-badge">未连接</span></div>
+        <div class="wechat-grid">
+          <article class="panel">
+            <div class="panel-head"><div><span class="kicker">CONNECTION</span><h3>TraceMemo 本地通道</h3></div></div>
+            <form id="wechat-config-form" class="form-panel compact-form">
+              <label>Local HTTP API 地址<input id="tracememo-base-url" value="http://127.0.0.1:6131" autocomplete="url"></label>
+              <label>Bearer Token<input id="tracememo-token" type="password" placeholder="留空则沿用已安全保存的 Token" autocomplete="off"><small>获取位置：TraceMemo → API Center → API Token →「复制 Token」。只需粘贴到这里一次，不要发到聊天中。</small></label>
+              <label class="check-row"><input id="tracememo-save-token" type="checkbox" checked> 使用 Windows DPAPI 安全保存，之后不必重复输入</label>
+              <div class="button-row"><button class="primary" type="submit">连接并验证</button><button id="tracememo-forget" class="text-btn" type="button">忘记 Token</button></div>
+            </form>
+            <div id="wechat-connection-detail" class="connection-detail">正在读取连接状态……</div>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><span class="kicker">OFFICIAL ACCOUNT INBOX</span><h3>公众号文章收件箱</h3></div><button id="wechat-load-official-accounts" class="text-btn">刷新公众号</button></div>
+            <p>从本地微信识别公众号文章卡片，直接展示标题、摘要和原文链接；只有你点击后才回源读取正文。</p>
+            <form id="wechat-official-form" class="form-panel compact-form">
+              <label>公众号<select id="wechat-official-account" required><option value="">先点击“刷新公众号”</option></select></label>
+              <label>读取范围<select id="wechat-official-days"><option value="7">最近 7 天</option><option value="30" selected>最近 30 天</option><option value="90">最近 90 天</option><option value="365">最近一年</option></select></label>
+              <button class="primary wide" type="submit">读取文章卡片</button>
+            </form>
+            <div id="wechat-official-summary" class="connection-detail">公众号内容将优先进入导读流程，不会自动写入知识库。</div>
+          </article>
+        </div>
+        <div id="wechat-article-inbox" class="wechat-preview"></div>
+        <details class="panel">
+          <summary><b>其他微信来源（群聊 / 联系人，可选）</b></summary>
+          <div class="panel-head"><div><span class="kicker">AUXILIARY CHAT SOURCE</span><h3>按需读取聊天片段</h3></div><button id="wechat-recent" class="text-btn">查看最近会话</button></div>
+          <form id="wechat-query-form" class="form-panel compact-form">
+            <label>联系人或群聊<input id="wechat-talker" placeholder="例如：技术交流群" required></label>
+            <label>日期或闭区间<input id="wechat-time" placeholder="2026-08-23 或 2026-08-20~2026-08-23"></label>
+            <label>候选标题<input id="wechat-candidate-title" placeholder="例如：关于预测编码的群聊讨论"></label>
+            <button class="secondary wide" type="submit">读取并预览（默认过滤系统通知）</button>
+          </form>
+          <div id="wechat-recent-result"></div>
+        </details>
+        <div id="wechat-preview" class="wechat-preview"></div>
+        <article class="panel wechat-candidates-panel">
+          <div class="panel-head"><div><span class="kicker">L1 REVIEW QUEUE</span><h3>待审核知识候选</h3></div><button id="wechat-refresh-candidates" class="text-btn">刷新</button></div>
+          <div id="wechat-candidates" class="wechat-candidate-list"><div class="empty">还没有微信候选。</div></div>
+        </article>
+      </section>
+
+      <section class="view" id="view-settings">
+        <div class="section-intro"><div><span class="kicker">GARDEN TOOLS</span><h2>照料你的花园</h2><p>所有索引都留在本机。网页与 Obsidian 双向同步：原始输入进入 raw/，编译结果进入 wiki/，你的已有笔记不会被静默覆盖。</p></div></div>
+        <div class="settings-grid">
+          <form class="panel form-panel" id="settings-form"><h3>Obsidian 与学习画像</h3><label>Vault 文件夹路径<input id="vault-path" placeholder="D:\Notes\MyVault"></label><label>当前知识水平<select id="learning-level"><option>高中基础</option><option selected>本科入门</option><option>本科进阶</option><option>研究生</option><option>领域从业者</option></select></label><label>兴趣关键词<textarea id="interests" rows="3" placeholder="摄影、科幻、音乐、城市漫游……"></textarea></label><button class="primary wide" type="submit">保存并同步 Obsidian</button></form>
+          <div class="tool-stack">
+            <article class="panel tool-card textbook-tool"><div class="tool-icon">▤</div><div><h3>教材总目录</h3><p>递归发现目录下所有 PDF。第一次建立索引，以后只解析新增或修改过的教材。</p><input id="textbook-directory" placeholder="例如 D:\教材（可包含多层子文件夹）"></div><button id="import-textbooks" class="secondary">增量扫描</button></article>
+            <article class="panel raw-tool"><div><h3>编译 Raw 资料</h3><p>按 AGENTS.md 规则生成概念底座、降维对照、双向链接与主题 MOC。</p></div><div class="raw-row"><input id="raw-file" placeholder="raw/2026-08-21-example.md"><button id="ingest-raw" class="secondary">执行 Ingest</button></div><small id="link-health">链接闭合状态将在编译后显示</small></article>
+            <article class="panel tool-card"><div class="tool-icon">芽</div><div><h3>知识园丁主动巡视</h3><p>扫描 raw 更新，补全知识页、主题索引和 AGENTS.md 来源清单。</p></div><button id="agent-patrol" class="secondary">立即巡视</button></article>
+            <article class="panel tool-card"><div class="tool-icon">AI</div><div><h3>个性化讲解</h3><p id="llm-status">正在检测大模型配置……</p></div><span id="llm-badge" class="status-badge">检测中</span></article>
+            <article class="panel tool-card"><div class="tool-icon" aria-hidden="true">✉</div><div><h3>微信本地通道</h3><p id="wechat-settings-status">TraceMemo 尚未连接。</p></div><button class="secondary" data-go="wechat">打开微信苗圃</button></article>
+            <article class="panel safety"><b>隐私约定</b><p>API Key 运行时只进入服务内存；也可由 Windows DPAPI 加密保存在本机。它不会出现在网页、数据库或 Obsidian 笔记中。默认仅本机可访问。</p></article>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="review-modal" class="modal" aria-hidden="true">
+    <div class="modal-card">
+      <button class="modal-close" id="review-close" aria-label="关闭">×</button>
+      <span class="kicker">ACTIVE RECALL</span>
+      <h2 id="review-title">开始复习</h2>
+      <p id="review-question" class="review-question"></p>
+      <form id="review-form">
+        <div id="review-answer-area"></div>
+        <label id="rating-wrap" class="rating-label">你对这次回答的把握
+          <select id="review-rating">
+            <option value="0">不会——只是猜测</option>
+            <option value="1">模糊——需要提示</option>
+            <option value="2" selected>掌握——能自己解释</option>
+            <option value="3">迁移——能举例和判断边界</option>
+          </select>
+        </label>
+        <button class="primary wide" type="submit">提交回答</button>
+        <button class="text-btn hint-btn" id="review-hint" type="button">我卡住了，给我一级提示</button>
+      </form>
+      <div id="review-result" class="review-result"></div>
+    </div>
+  </div>
+  <div id="reading-workspace" class="reading-workspace" aria-hidden="true">
+    <div class="reading-shell">
+      <header class="reading-header">
+        <div><span class="kicker">GUIDED READING DESK</span><h2 id="reading-title">文章导读</h2><small id="reading-byline"></small></div>
+        <div class="button-row"><a id="reading-original-link" class="secondary" target="_blank" rel="noopener noreferrer">浏览器打开原文</a><button id="reading-close" class="modal-close" type="button" aria-label="关闭导读">×</button></div>
+      </header>
+      <div class="reading-columns">
+        <section class="reading-source-pane">
+          <div class="reading-pane-head"><b>原文阅读</b><small id="reading-source-status">本地提取正文</small></div>
+          <article id="reading-source" class="reading-source"></article>
+        </section>
+        <section class="reading-guide-pane">
+          <div class="reading-pane-head"><b>园丁导读与讨论</b><small>你可以自由追问，不必选择预设问题</small></div>
+          <div id="reading-conversation" class="reading-conversation"></div>
+          <form id="reading-question-form" class="reading-question-form">
+            <textarea id="reading-question" rows="3" placeholder="写下你的预测、质疑，或请园丁解释某一段……" required></textarea>
+            <button class="primary" type="submit">继续导读</button>
+          </form>
+        </section>
+      </div>
+    </div>
+  </div>
+  <div id="toast" class="toast"></div>
+  <div id="busy" class="busy"><div class="loader"><i></i><span>知识园丁正在松土……</span></div></div>
+  <script src="/app.js"></script>
+</body>
+</html>

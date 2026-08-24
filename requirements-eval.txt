@@ -1,0 +1,4 @@
+ragas==0.4.3
+openai==2.45.0
+instructor==1.15.4
+pandas==3.0.5
