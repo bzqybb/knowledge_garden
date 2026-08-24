@@ -1,8 +1,35 @@
-.venv/
+﻿# 数据文件（浏览器、应用缓存等）
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
 __pycache__/
-*.py[cod]
-.env
-data/runtime/
-.idea/
-evals/reports/
-evals/snapshots/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# 密钥
+api_key.json
+*.pem
+*.key
+config.local.json
+
+# 运行产物
+*.log
+*.pid
+.DS_Store
+Thumbs.db
+outputs/
+temp/
+tmp/
