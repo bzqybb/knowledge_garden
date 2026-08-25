@@ -1,12 +1,41 @@
 from __future__ import annotations
 
+from functools import lru_cache
+from queue import Queue
+from threading import Thread
 from typing import Any
 
-from core.config import llm_config
+from core.config import LLMConfig, llm_config, understanding_llm_config
 
 
 class LLMError(RuntimeError):
     pass
+
+
+def _invoke_with_hard_timeout(function: Any, timeout: float, label: str) -> Any:
+    """Enforce a wall-clock deadline even if a provider socket ignores timeout.
+
+    Some Windows TLS/DNS failures remained blocked far beyond the timeout
+    forwarded by LangChain/OpenAI. A daemon worker lets the tutoring turn fall
+    back on time; the abandoned socket cannot keep the process alive.
+    """
+    mailbox: Queue[tuple[bool, Any]] = Queue(maxsize=1)
+
+    def run() -> None:
+        try:
+            mailbox.put((True, function()))
+        except BaseException as exc:  # pass provider exceptions to caller
+            mailbox.put((False, exc))
+
+    worker = Thread(target=run, name=f"garden-{label}-deadline", daemon=True)
+    worker.start()
+    worker.join(max(0.5, float(timeout) + 1.0))
+    if worker.is_alive():
+        raise LLMError(f"{label}超过 {timeout:g} 秒硬截止，已切换安全回退")
+    ok, value = mailbox.get_nowait()
+    if not ok:
+        raise value
+    return value
 
 
 def _langchain_components():
@@ -83,13 +112,105 @@ def chat_json(
     )
     chain = prompt | model | parser
     try:
-        result = chain.invoke({
-            "system": system,
-            "user": user,
-            "format_instructions": parser.get_format_instructions(),
-        })
+        result = _invoke_with_hard_timeout(
+            lambda: chain.invoke({
+                "system": system,
+                "user": user,
+                "format_instructions": parser.get_format_instructions(),
+            }),
+            timeout,
+            "结构化模型调用",
+        )
     except Exception as exc:
         raise LLMError(f"LangChain 结构化输出链执行失败：{exc}") from exc
     if not isinstance(result, dict):
         raise LLMError("大模型返回格式不正确")
     return result
+
+
+def _chat_json_with_config(
+    config: LLMConfig, system: str, user: str, *, timeout: float, max_retries: int,
+) -> dict[str, Any] | None:
+    if not config.enabled:
+        return None
+    ChatPromptTemplate, ChatOpenAI, _, JsonOutputParser = _langchain_components()
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "{system}"),
+        ("human", "{user}"),
+    ])
+    parser = JsonOutputParser()
+    model = _configured_json_model(
+        config.api_key, config.base_url, config.model, timeout, max_retries,
+    )
+    try:
+        chain = prompt | model | parser
+        result = _invoke_with_hard_timeout(
+            lambda: chain.invoke({"system": system, "user": user}),
+            timeout,
+            "问题理解模型调用",
+        )
+    except Exception as exc:
+        raise LLMError(f"LangChain 问题理解链执行失败：{exc}") from exc
+    if not isinstance(result, dict):
+        raise LLMError("问题理解模型返回格式不正确")
+    return result
+
+
+@lru_cache(maxsize=4)
+def _configured_json_model(
+    api_key: str, base_url: str, model_name: str, timeout: float, max_retries: int,
+):
+    """Reuse the provider client and its HTTPS connection pool in-process."""
+    _, ChatOpenAI, _, _ = _langchain_components()
+    is_glm = "bigmodel.cn" in base_url.casefold()
+    return ChatOpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        model=model_name,
+        temperature=0.1,
+        timeout=timeout,
+        max_retries=max_retries,
+        model_kwargs={"response_format": {"type": "json_object"}},
+        # Problem parsing is a bounded routing task, not deep research.
+        extra_body={"thinking": {"type": "disabled"}} if is_glm else None,
+    )
+
+
+def understanding_chat_json(
+    system: str, user: str, *, timeout: float = 6, max_retries: int = 0,
+) -> tuple[dict[str, Any] | None, str]:
+    """Use GLM for question understanding without stacking two slow calls.
+
+    A timeout or provider failure has already consumed the interaction budget,
+    so the caller uses its deterministic, auditable parser instead of waiting
+    for a second remote model.
+    """
+    config = understanding_llm_config()
+    if config.enabled:
+        try:
+            return _chat_json_with_config(
+                config, system, user, timeout=timeout, max_retries=max_retries,
+            ), f"glm:{config.model}"
+        except LLMError as glm_error:
+            _configured_json_model.cache_clear()
+            message = str(glm_error)
+            reason = "rate_limited" if "429" in message or "1305" in message else "unavailable"
+            return None, f"deterministic-fallback-after-glm-{reason}"
+    return chat_json(system, user, timeout=timeout, max_retries=max_retries), "primary-model-fallback"
+
+
+def prewarm_understanding_model() -> tuple[bool, str]:
+    """Warm the dedicated parser connection without blocking server startup."""
+    config = understanding_llm_config()
+    if not config.enabled:
+        return False, "GLM 问题理解未配置"
+    try:
+        payload, provider = understanding_chat_json(
+            "只输出 JSON：{\"ready\":true}。不解释。",
+            "ready",
+            timeout=6,
+            max_retries=0,
+        )
+    except Exception as exc:
+        return False, f"GLM 预热失败：{exc.__class__.__name__}"
+    return bool(payload), f"{provider} 预热{'完成' if payload else '跳过'}"

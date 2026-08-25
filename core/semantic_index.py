@@ -20,6 +20,21 @@ INDEX_SCHEMA_VERSION = 3
 INDEX_KINDS = {"concept", "moc", "bridge", "knowledge", "course", "textbook"}
 _LOCK = threading.Lock()
 _CACHE: dict[str, Any] = {}
+PDF_PAGE_PATH_RE = re.compile(r"^(pdf::.+#page=)(\d+)$")
+
+
+def _adjacent_pdf_paths(path: str) -> list[str]:
+    """Return immediate page neighbours without crossing document boundaries."""
+    match = PDF_PAGE_PATH_RE.match(str(path or ""))
+    if not match:
+        return []
+    prefix, raw_page = match.groups()
+    page = int(raw_page)
+    neighbours = []
+    if page > 1:
+        neighbours.append(f"{prefix}{page - 1}")
+    neighbours.append(f"{prefix}{page + 1}")
+    return neighbours
 
 
 def _model_name() -> str:
@@ -53,9 +68,35 @@ def _chunks(text: str, *, size: int = 900, overlap: int = 140) -> list[str]:
     return chunks
 
 
+def _expand_record_window(
+    records: list[dict[str, Any]], record: dict[str, Any], *, before: int = 3, after: int = 0,
+) -> tuple[str, list[int]]:
+    """Return the matched chunk with adjacent chunks from the same source.
+
+    Embedding search should stay chunk-sized, while evidence review needs the
+    surrounding textbook argument. This prevents a page from being found via
+    a figure/caption chunk while the defining sentence immediately before it
+    is silently discarded.
+    """
+    path = str(record.get("path") or "")
+    center = int(record.get("chunk_index", 0) or 0)
+    lower = center - max(0, before)
+    upper = center + max(0, after)
+    window = sorted(
+        (
+            item for item in records
+            if str(item.get("path") or "") == path
+            and lower <= int(item.get("chunk_index", 0) or 0) <= upper
+        ),
+        key=lambda item: int(item.get("chunk_index", 0) or 0),
+    )
+    indices = [int(item.get("chunk_index", 0) or 0) for item in window]
+    return "\n".join(str(item.get("text") or "").strip() for item in window if str(item.get("text") or "").strip()), indices
+
+
 def _signature(notes: list[dict[str, Any]], model_name: str) -> str:
     digest = hashlib.sha256(model_name.encode("utf-8"))
-    for note in notes:
+    for note in sorted(notes, key=lambda item: str(item["path"])):
         digest.update(str(note["path"]).encode("utf-8"))
         content_hash = str(note.get("content_hash") or hashlib.sha256(str(note.get("content", "")).encode("utf-8")).hexdigest())
         digest.update(content_hash.encode("ascii"))
@@ -237,4 +278,38 @@ def semantic_search(
         old = best_by_path.get(record["path"])
         if old is None or item["semantic_score"] > old["semantic_score"]:
             best_by_path[record["path"]] = item
-    return sorted(best_by_path.values(), key=lambda item: item["semantic_score"], reverse=True)[:limit]
+    # Textbook arguments frequently cross a PDF page boundary. Propagate a
+    # strong page hit to its immediate neighbours with a small score penalty,
+    # preserving each neighbour as its own auditable path/title.
+    records_by_path: dict[str, list[dict[str, Any]]] = {}
+    for record in metadata.get("records", []):
+        records_by_path.setdefault(str(record.get("path") or ""), []).append(record)
+    seeds = sorted(
+        best_by_path.values(), key=lambda item: item["semantic_score"], reverse=True,
+    )[:8]
+    for seed in seeds:
+        for neighbour_path in _adjacent_pdf_paths(str(seed.get("path") or "")):
+            neighbour_records = records_by_path.get(neighbour_path, [])
+            if not neighbour_records:
+                continue
+            propagated_score = round(max(0.0, float(seed["semantic_score"]) - 0.008), 4)
+            existing = best_by_path.get(neighbour_path)
+            if existing is not None and float(existing["semantic_score"]) >= propagated_score:
+                continue
+            first_record = min(
+                neighbour_records, key=lambda item: int(item.get("chunk_index", 0) or 0),
+            )
+            best_by_path[neighbour_path] = {
+                **first_record,
+                "semantic_score": propagated_score,
+                "adjacent_to": str(seed.get("path") or ""),
+            }
+    expanded: list[dict[str, Any]] = []
+    records = list(metadata.get("records", []))
+    for item in best_by_path.values():
+        # A semantic hit may land on either the explanation before a figure or
+        # the caption before the explanatory paragraph. Keep a bounded,
+        # same-page window in both directions so neither half is discarded.
+        text, indices = _expand_record_window(records, item, before=3, after=3)
+        expanded.append({**item, "text": text or str(item.get("text") or ""), "window_chunk_indices": indices})
+    return sorted(expanded, key=lambda item: item["semantic_score"], reverse=True)[:limit]

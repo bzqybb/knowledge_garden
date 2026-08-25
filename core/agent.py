@@ -224,7 +224,9 @@ def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
     knowledge_signature = "|".join(f"{note['id']}:{note['updated_at']}" for note in knowledge_notes[:80])
     profile_signature = hashlib.sha256((today + level + "|".join(interests) + knowledge_signature).encode("utf-8")).hexdigest()
     cached = store.setting(cache_key, {}) or {}
-    if not force and cached.get("signature") == profile_signature:
+    # Never pin an empty transient failure for the whole day. Successful
+    # recommendations may use the daily profile cache normally.
+    if not force and cached.get("signature") == profile_signature and cached.get("items"):
         return cached
     if not interests:
         result = {
@@ -240,23 +242,40 @@ def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
     offset = (date.today().toordinal() + refresh_index) % len(interests)
     chosen = [interests[(offset + index) % len(interests)] for index in range(min(2, len(interests)))]
     articles = []
+    retrieval_reports: list[dict[str, Any]] = []
+    retrieval_errors: list[str] = []
     for interest in chosen:
         query = INTEREST_SEARCH_TERMS.get(interest, f"{interest} recent research review")
+        diagnostics: dict[str, Any] = {}
         try:
             found = search_academic_articles(
-                query, limit=6, from_publication_date=(date.today() - timedelta(days=45)).isoformat()
+                query, limit=6, from_publication_date=(date.today() - timedelta(days=45)).isoformat(),
+                diagnostics=diagnostics,
             )
-        except Exception:
+        except Exception as exc:
             found = []
+            if not diagnostics.get("errors"):
+                diagnostics["errors"] = [f"{exc.__class__.__name__}：{exc}"]
+        diagnostics["interest"] = interest
+        diagnostics["query"] = query
+        retrieval_reports.append(diagnostics)
+        retrieval_errors.extend(str(item) for item in diagnostics.get("errors", []) if str(item).strip())
+        added_for_interest = 0
         for article in found:
-            if any(item.get("url") == article.get("url") for item in articles):
+            title_key = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", str(article.get("title") or "").lower())
+            if any(
+                item.get("url") == article.get("url")
+                or re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", str(item.get("title") or "").lower()) == title_key
+                for item in articles
+            ):
                 continue
             article = dict(article)
             article["interest"] = interest
             articles.append(article)
-            if len(articles) >= 3:
+            added_for_interest += 1
+            if added_for_interest >= 2:
                 break
-        if len(articles) >= 3:
+        if len(articles) >= 4:
             break
     read_urls = set(store.setting("frontier_read_urls", []) or [])
     ranked = []
@@ -308,11 +327,25 @@ def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
             "reading_guide": guide, "read": article.get("url") in read_urls,
             "prompt": f"请带我导读《{article.get('title','')}》。先让我回答读前预测，再逐个检查研究对象、证据类型、与本地知识的关系和适用边界；不要一次把答案全部讲完。",
         })
+    providers = list(dict.fromkeys(
+        str(item.get("provider")) for item in retrieval_reports if item.get("provider")
+    ))
+    degraded = any(bool(item.get("degraded")) for item in retrieval_reports)
+    if items and degraded:
+        notice = f"主检索源暂时不可用，园丁已自动切换到{'、'.join(providers) or '备用学术源'}。"
+    elif items:
+        notice = f"今日推荐来自{'、'.join(providers) or '在线学术源'}。"
+    else:
+        notice = "；".join(dict.fromkeys(retrieval_errors)) or "在线来源没有返回符合当前兴趣和时间范围的文章。"
     result = {
         "signature": profile_signature, "date": today, "level": level, "interests": interests,
-        "items": items, "message": "" if items else "今天暂时没有取得在线推荐；园丁仍会保留你的兴趣画像，稍后再巡视。",
+        "items": items,
+        "message": "" if items else f"今天没有生成推荐：{notice}",
+        "notice": notice,
+        "retrieval": {"providers": providers, "degraded": degraded, "errors": list(dict.fromkeys(retrieval_errors)), "reports": retrieval_reports},
     }
-    store.set_setting(cache_key, result)
+    if items:
+        store.set_setting(cache_key, result)
     return result
 
 

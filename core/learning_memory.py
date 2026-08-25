@@ -307,6 +307,113 @@ class LearningMemoryService:
         claims.sort(key=lambda item: (item["layer"], item["effective_confidence"]), reverse=True)
         return {"claims": claims[:12], "concept_mastery": mastery}
 
+    def l3_profile_graph(self, *, min_effective_confidence: float = 0.4) -> dict[str, Any]:
+        """Project safe L3 claims and their provenance as an inspectable graph.
+
+        The graph is a read model over evidence-bearing memory claims rather than
+        a second, opaque profile store.  Only dimensions that are allowed to
+        affect teaching are exposed.  Each L3 pattern remains connected to the
+        scoped L2 hypotheses from which it was generalized.
+        """
+        safe_dimensions = {"teaching_preference", "self_regulation"}
+        with self.store.connect() as conn:
+            l3_rows = [dict(row) for row in conn.execute(
+                """SELECT claim_id,dimension,claim_text,confidence,source_kind,updated_at
+                   FROM memory_claims
+                   WHERE owner_id='local' AND layer=3 AND status='active'
+                     AND (valid_until IS NULL OR valid_until>?)
+                   ORDER BY confidence DESC,updated_at DESC LIMIT 8""",
+                (utc_now(),),
+            )]
+            source_rows = [dict(row) for row in conn.execute(
+                """SELECT e.claim_id AS l3_claim_id,c.claim_id,c.dimension,c.scope_type,
+                          c.scope_key,c.claim_text,c.confidence,c.source_kind,c.updated_at,
+                          COUNT(raw.id) AS evidence_count
+                   FROM memory_claim_evidence e
+                   JOIN memory_claims c ON c.claim_id=e.source_claim_id
+                   LEFT JOIN memory_claim_evidence raw ON raw.claim_id=c.claim_id
+                   WHERE e.relation='supports' AND c.layer=2
+                   GROUP BY e.claim_id,c.claim_id
+                   ORDER BY c.confidence DESC,c.updated_at DESC"""
+            )]
+
+        now = datetime.now(timezone.utc)
+        sources_by_l3: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for source in source_rows:
+            sources_by_l3[str(source["l3_claim_id"])].append(source)
+
+        nodes: list[dict[str, Any]] = [{
+            "id": "learner:local", "type": "learner", "label": "本地学习者",
+        }]
+        edges: list[dict[str, Any]] = []
+        patterns: list[dict[str, Any]] = []
+        seen_nodes = {"learner:local"}
+        seen_edges: set[tuple[str, str, str]] = set()
+
+        def add_node(node: dict[str, Any]) -> None:
+            if node["id"] not in seen_nodes:
+                nodes.append(node)
+                seen_nodes.add(node["id"])
+
+        def add_edge(source: str, target: str, relation: str) -> None:
+            key = (source, target, relation)
+            if key not in seen_edges:
+                edges.append({"source": source, "target": target, "relation": relation})
+                seen_edges.add(key)
+
+        for claim in l3_rows:
+            dimension = str(claim.get("dimension") or "")
+            if dimension not in safe_dimensions:
+                continue
+            updated = parse_utc(claim.get("updated_at")) or now
+            elapsed = max(0.0, (now - updated).total_seconds() / 86_400)
+            effective = float(claim.get("confidence") or 0.0) * exponential_retention(elapsed, 180.0)
+            if effective < min_effective_confidence:
+                continue
+
+            claim_id = str(claim["claim_id"])
+            dimension_id = f"dimension:{dimension}"
+            l3_node_id = f"l3:{claim_id}"
+            add_node({"id": dimension_id, "type": "dimension", "label": dimension})
+            add_node({
+                "id": l3_node_id, "type": "l3_pattern", "label": claim["claim_text"],
+                "claim_id": claim_id, "confidence": round(effective, 4),
+                "source_kind": claim.get("source_kind"),
+            })
+            add_edge("learner:local", dimension_id, "has_dimension")
+            add_edge(dimension_id, l3_node_id, "has_stable_pattern")
+
+            contexts: list[str] = []
+            source_claim_ids: list[str] = []
+            for source in sources_by_l3.get(claim_id, [])[:8]:
+                source_claim_id = str(source["claim_id"])
+                source_claim_ids.append(source_claim_id)
+                l2_node_id = f"l2:{source_claim_id}"
+                add_node({
+                    "id": l2_node_id, "type": "l2_hypothesis", "label": source["claim_text"],
+                    "claim_id": source_claim_id, "scope_type": source["scope_type"],
+                    "scope_key": source["scope_key"], "confidence": source["confidence"],
+                    "evidence_count": int(source.get("evidence_count") or 0),
+                })
+                add_edge(l3_node_id, l2_node_id, "generalized_from")
+                scope_type = str(source.get("scope_type") or "global")
+                scope_key = str(source.get("scope_key") or "all")
+                context_label = f"{scope_type}:{scope_key}"
+                context_id = f"context:{context_label}"
+                contexts.append(context_label)
+                add_node({"id": context_id, "type": "context", "label": context_label})
+                add_edge(l2_node_id, context_id, "observed_in")
+
+            patterns.append({
+                "claim_id": claim_id,
+                "dimension": dimension,
+                "claim": claim["claim_text"],
+                "effective_confidence": round(effective, 4),
+                "contexts": sorted(set(contexts)),
+                "source_claim_ids": source_claim_ids,
+            })
+        return {"nodes": nodes, "edges": edges, "applicable_patterns": patterns}
+
     def record_personalization_feedback(
         self,
         *,
@@ -889,7 +996,11 @@ class LearningMemoryService:
                 "SELECT COUNT(*) n FROM learning_events WHERE event_type!='memory_reflection'"
             ).fetchone()["n"]
         return {
-            "experience_memory": {"claims": claims, "l1_event_count": events},
+            "experience_memory": {
+                "claims": claims,
+                "l1_event_count": events,
+                "l3_profile_graph": self.l3_profile_graph(),
+            },
             "knowledge_memory": self.knowledge_overview(),
             "concept_mastery": mastery,
             "last_reflection_at": self.store.setting("memory.last_reflection_at", ""),

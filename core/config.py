@@ -10,6 +10,7 @@ DATA_DIR = ROOT / "data"
 RUNTIME_DIR = DATA_DIR / "runtime"
 DB_PATH = RUNTIME_DIR / "garden.db"
 SAVED_API_KEY_PATH = RUNTIME_DIR / "garden-api-key.dpapi"
+SAVED_UNDERSTANDING_API_KEY_PATH = RUNTIME_DIR / "understanding-api-key.dpapi"
 WEB_DIR = ROOT / "web"
 
 
@@ -36,6 +37,32 @@ def llm_config() -> LLMConfig:
         api_key=api_key,
         base_url=os.getenv("GARDEN_BASE_URL", "https://api.deepseek.com").rstrip("/"),
         model=os.getenv("GARDEN_MODEL", "deepseek-v4-flash").strip(),
+    )
+
+
+def understanding_llm_config() -> LLMConfig:
+    """Return the dedicated question-understanding model configuration.
+
+    A separate key keeps the GLM understanding agent independent from the
+    DeepSeek teaching/generation model.  When GLM is not configured the caller
+    deliberately falls back to ``llm_config`` rather than disabling the whole
+    agent pipeline.
+    """
+    api_key = os.getenv("GARDEN_UNDERSTANDING_API_KEY", "").strip()
+    saved_key_allowed = os.getenv("GARDEN_DISABLE_SAVED_API_KEY", "").strip() != "1"
+    if not api_key and saved_key_allowed and SAVED_UNDERSTANDING_API_KEY_PATH.is_file():
+        from core.credentials import load_secret
+
+        api_key = load_secret(SAVED_UNDERSTANDING_API_KEY_PATH).strip()
+    return LLMConfig(
+        api_key=api_key,
+        base_url=os.getenv(
+            "GARDEN_UNDERSTANDING_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"
+        ).rstrip("/"),
+        # AirX is used as a low-latency semantic router.  The understanding
+        # agent should parse intent quickly; it does not need the slower
+        # deliberative models used for the final teaching answer.
+        model=os.getenv("GARDEN_UNDERSTANDING_MODEL", "glm-4.5-airx").strip(),
     )
 
 

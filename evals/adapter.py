@@ -71,6 +71,17 @@ def run_retrieval_case(store: GardenStore, case: dict[str, Any], *, limit: int =
     should_abstain = bool(case.get("should_abstain", False))
     if should_abstain:
         metrics["retrieval_abstention_correct"] = float(not hits)
+    query_plan = hits[0].get("query_plan", {}) if hits else {}
+    retrieval_diagnostics = [
+        {
+            "title": item.get("title", ""),
+            "fusion_score": round(float(item.get("fusion_score", 0.0)), 6),
+            "reranker_score": item.get("reranker_score"),
+            "semantic_score": item.get("semantic_score"),
+            "query_matches": item.get("query_matches", []),
+        }
+        for item in hits
+    ]
     return {
         "id": case["id"],
         "category": case.get("category", "unspecified"),
@@ -78,6 +89,10 @@ def run_retrieval_case(store: GardenStore, case: dict[str, Any], *, limit: int =
         "retrieved_titles": titles,
         "retrieved_context_ids": paths,
         "reference_titles": reference_titles,
+        "query_plan": query_plan,
+        "query_strategy": query_plan.get("strategy", "") if isinstance(query_plan, dict) else "",
+        "query_count": len(query_plan.get("queries", [])) if isinstance(query_plan, dict) else 0,
+        "retrieval_diagnostics": retrieval_diagnostics,
         "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         "first_relevant_rank": first_relevant_rank,
         "reciprocal_rank": round(1.0 / first_relevant_rank, 4) if first_relevant_rank else 0.0,
@@ -123,5 +138,6 @@ def run_graph_case(store: GardenStore, case: dict[str, Any]) -> dict[str, Any]:
         "retrieved_context_ids": evaluation.get("retrieved_context_ids", []),
         "retrieved_titles": evaluation.get("retrieved_titles", []),
         "used_source_ids": result.get("citation_binding", {}).get("used_source_ids", []),
+        "agent_trace": result.get("agent_trace", []),
         "latency_ms": round((time.perf_counter() - started) * 1000, 2),
     }

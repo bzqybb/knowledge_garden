@@ -19,7 +19,7 @@ from core.compiler import ingest_raw, validate_links
 from core.engine import add_interest, analyze_frontier, article_preview_metadata, evaluate_review, weekly_report
 from core.inspiration import explore_inspiration, save_inspiration_seed
 from core.feeds import refresh_feeds
-from core.llm import LLMError, chat
+from core.llm import LLMError, chat, prewarm_understanding_model
 from core.learning_memory import LearningMemoryService
 from core.mindmap import build_mindmap
 from core.obsidian import sync_vault, write_raw_material
@@ -168,6 +168,17 @@ def memory_patrol(stop_event: threading.Event, interval_minutes: int = 30) -> No
             MEMORY.refresh_knowledge_weights()
         except Exception as exc:
             print(f"[Knowledge Garden] 经验反思巡检失败：{exc}")
+
+
+def understanding_warmup() -> None:
+    """Prime GLM/HTTPS in the background so the first user turn stays fast."""
+    try:
+        ok, message = prewarm_understanding_model()
+        colorless_status = "就绪" if ok else "未就绪（提问时会使用安全兜底）"
+        print(f"[Knowledge Garden] 问题理解器{colorless_status}：{message}")
+    except Exception as exc:
+        # Warm-up is an optimization, never a reason to terminate the garden.
+        print(f"[Knowledge Garden] 问题理解器预热已跳过：{exc.__class__.__name__}")
 
 
 class GardenHandler(BaseHTTPRequestHandler):
@@ -334,7 +345,7 @@ class GardenHandler(BaseHTTPRequestHandler):
                 base_url = STORE.setting("tracememo_base_url", "http://127.0.0.1:6131")
                 client = TraceMemoClient(tracememo_config(base_url))
                 contact = client.resolve(talker)
-                result = client.official_articles(talker, days=days)
+                result = client.official_articles(talker, days=days, contact=contact)
                 result["contact"] = contact
                 self._json({"ok": True, "result": result})
             elif path == "/api/wechat/article/read":
@@ -386,7 +397,7 @@ class GardenHandler(BaseHTTPRequestHandler):
                             raise ValueError("公众号正文过短或被验证页拦截，暂不写入知识图谱")
                         lines = [
                             "> 来源：由用户授权，通过 TraceMemo 定位公众号文章，并回到原网址读取正文。",
-                            f"> 公众号：{article.get('publisher') or candidate.get('talker', '')}",
+                            f"> 公众号：{article.get('account_name') or article.get('publisher') or candidate.get('talker', '')}",
                             f"> 原文：{article_url}",
                             f"> 发布时间：{article.get('sent_at') or candidate.get('time_range') or '未知'}",
                             "> 边界：下文是从原网址取得的正文；自动分类必须引用正文证据，不能根据公众号名猜测。",
@@ -640,6 +651,12 @@ def main() -> None:
         name="memory-patrol",
     )
     memory_watch.start()
+    understanding_warm = threading.Thread(
+        target=understanding_warmup,
+        daemon=True,
+        name="understanding-warmup",
+    )
+    understanding_warm.start()
     print(f"\n[Knowledge Garden] 知识花园已启动：http://{args.host}:{args.port}")
     print("按 Ctrl+C 停止。API Key 仅在进程内存中解密使用。\n")
     try:

@@ -20,6 +20,7 @@
   font-size: 12px;
 }
 .frontier-scores{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}.frontier-scores span{font-size:11px;padding:4px 8px;border-radius:999px;background:#edf2e7;color:#45614d}.reading-guide{margin:12px 0;border-top:1px solid #dfe6d8;border-bottom:1px solid #dfe6d8;padding:9px 0}.reading-guide summary{cursor:pointer;font-weight:700;color:#315b45}.reading-guide div{padding:10px 4px 2px}.reading-guide p,.reading-guide li{font-size:13px;line-height:1.65}.daily-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.daily-card.is-read{opacity:.72}.daily-card button:disabled{cursor:default;opacity:.65}
+.source-notice{grid-column:1/-1;padding:10px 13px;margin-bottom:10px;border:1px solid #dbe4d5;border-radius:12px;background:#f3f6ed;color:#526a59;font-size:12px;line-height:1.55}
 .inspiration-dialogue{margin-top:18px}.mode-banner{padding:10px 13px;border-radius:12px;background:#fff3cf;color:#795c19;font-weight:700;margin-bottom:12px}.inspiration-routes{display:flex;flex-direction:column;gap:7px;margin:14px 0}.inspiration-routes b{font-size:13px}.inspiration-branch{text-align:left;white-space:normal}.inspiration-dialogue textarea{width:100%;margin:10px 0}.inspiration-dialogue .agent-decisions{margin-top:14px}
 
 /* Official-account articles are landscape information cards. The generic
@@ -51,8 +52,8 @@
 
 /* Keep the general gardener useful without making the whole home page an
    endless transcript. Older turns remain available behind an explicit fold. */
-#agent-answer.agent-answer.show{max-height:680px;overflow:auto;scrollbar-gutter:stable}
-.agent-history-bar{position:sticky;top:0;z-index:4;display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 10px;margin:-5px -5px 10px;background:rgba(255,253,248,.96);border-bottom:1px solid #e2e7dc;backdrop-filter:blur(7px)}
+#agent-answer.agent-answer.show{max-height:680px;overflow:auto;overflow-x:hidden;scrollbar-gutter:stable;padding:0 14px 14px}
+.agent-history-bar{position:sticky;top:0;z-index:4;display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;margin:0 -14px 10px;background:#fffdf8;border-bottom:1px solid #e2e7dc;border-radius:12px 12px 0 0;box-shadow:0 5px 10px rgba(45,70,54,.035)}
 .agent-history-bar span{font-size:9px;color:#7a887f}.agent-history-bar>div{display:flex;gap:6px;white-space:nowrap}
 
 /* Guided reading has its own two-pane desk: source on the left, conversation

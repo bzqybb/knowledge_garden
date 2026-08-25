@@ -14,6 +14,7 @@ from core.compiler import ingest_raw, validate_links
 from core.context import ChatMessage, GardenContext, KnowledgeScope, LearnerSettings, ToolPolicy
 from core.context_builder import ContextBuilder
 from core.deepdiagram_adapter import DiagramSpec, build_local_diagram, validate_diagram
+from core.deepdiagram_service import _parse_mermaid, _structure_comparison_graph
 from core.engine import (
     add_interest,
     analyze_frontier,
@@ -25,11 +26,15 @@ from core.engine import (
 from core.gardener_graph import (
     _fallback_planner,
     _fallback_wechat_lookup,
+    _question_subject,
     _requests_wechat_history,
     _wechat_time_params,
     audit_evidence,
     generate_answer,
     generate_visualization,
+    plan_sources,
+    planner_plan,
+    understand_question,
     repair_outputs,
     review_answer,
 )
@@ -41,7 +46,7 @@ from core.retrieval import classify_textbook_structure, ingest_pdf_directory, re
 from core.storage import GardenStore
 from core.taxonomy import classify_unmounted_concepts, rebuild_concept_hierarchy
 from core.tracememo import TraceMemoConfig, TraceMemoClient, normalize_message, tracememo_config
-from core.web_research import _WeChatArticleParser
+from core.web_research import _WeChatArticleParser, search_academic_articles
 
 
 class GardenTests(unittest.TestCase):
@@ -178,11 +183,34 @@ class GardenTests(unittest.TestCase):
         client = TraceMemoClient(TraceMemoConfig("http://127.0.0.1:6131", "token", False))
         with patch.object(client, "contacts", return_value={"contacts": [
             {"m_nsUsrName": "123@chatroom", "m_nsNickName": "普通群", "isOfficialAccount": False},
-            {"m_nsUsrName": "gh_abc", "m_nsNickName": "知识号", "isOfficialAccount": True},
+            {"m_nsUsrName": "gh_abc", "m_nsNickName": "知识号", "name": "错误名称", "isOfficialAccount": True},
+            {"m_nsUsrName": "gh_6ac216e2b856@app", "m_nsNickName": "gh_6ac216e2b856@app", "isOfficialAccount": True},
         ]}):
             accounts = client.official_accounts()
         self.assertEqual(accounts["count"], 1)
+        self.assertEqual(accounts["unresolved_count"], 1)
         self.assertEqual(accounts["items"][0]["m_nsNickName"], "知识号")
+        self.assertEqual(accounts["items"][0]["display_name"], "知识号")
+        self.assertEqual(accounts["items"][0]["account_id"], "gh_abc")
+
+    def test_tracememo_official_articles_preserve_real_account_nickname(self):
+        client = TraceMemoClient(TraceMemoConfig("http://127.0.0.1:6131", "token", False))
+        message = normalize_message({
+            "id": "article-1", "from": "gh_abc", "createTime": 1756798668,
+            "contentData": {
+                "title": "一篇文章", "url": "https://mp.weixin.qq.com/s/example",
+                "appname": "gh_abc",
+            },
+        })
+        with patch.object(client, "current_time", return_value={"now": "2026-08-25T09:30:00+08:00"}), \
+             patch.object(client, "chatlog", return_value={"messages": [message], "truncated": False}):
+            result = client.official_articles("gh_abc", contact={
+                "m_nsUsrName": "gh_abc", "m_nsNickName": "中文公众号", "name": "不正确的名称",
+            })
+        self.assertEqual(result["account_name"], "中文公众号")
+        self.assertEqual(result["articles"][0]["sender"], "中文公众号")
+        self.assertEqual(result["articles"][0]["article"]["publisher"], "中文公众号")
+        self.assertEqual(result["articles"][0]["article"]["account_name"], "中文公众号")
 
     def test_tracememo_bounded_chatlog_keeps_newest_messages(self):
         client = TraceMemoClient(TraceMemoConfig("http://127.0.0.1:6131", "token", False))
@@ -492,6 +520,79 @@ class GardenTests(unittest.TestCase):
         self.assertEqual(evidence_count, 5)
         self.assertEqual(reflection["l3_created"], 0)
 
+    def test_l3_profile_is_an_evidence_graph_but_does_not_bias_problem_understanding(self):
+        with self.store.connect() as conn:
+            for index, scope in enumerate(("define", "apply", "compare"), start=1):
+                session_id = f"l3-session-{index}"
+                event_id = f"l3-event-{index}"
+                l2_id = f"l2-source-{index}"
+                conn.execute("INSERT INTO sessions(session_id,title) VALUES(?,?)", (session_id, scope))
+                conn.execute(
+                    """INSERT INTO learning_events(
+                           event_id,session_id,surface,event_type,source_kind,payload_json
+                       ) VALUES(?,?,?,?,?,?)""",
+                    (event_id, session_id, "gardener_chat", "personalization_feedback", "explicit", "{}"),
+                )
+                conn.execute(
+                    """INSERT INTO memory_claims(
+                           claim_id,layer,dimension,scope_type,scope_key,claim_text,
+                           source_kind,confidence,status
+                       ) VALUES(?,2,'teaching_preference','task',?,?,'explicit',0.9,'active')""",
+                    (l2_id, scope, "复杂问题先给结构再展开机制"),
+                )
+                conn.execute(
+                    "INSERT INTO memory_claim_evidence(claim_id,event_id,weight) VALUES(?,?,1.0)",
+                    (l2_id, event_id),
+                )
+            conn.execute(
+                """INSERT INTO memory_claims(
+                       claim_id,layer,dimension,scope_type,scope_key,claim_text,
+                       source_kind,confidence,status
+                   ) VALUES('l3-structure',3,'teaching_preference','global','',
+                            '复杂问题先给结构再展开机制','inferred',0.86,'active')"""
+            )
+            for index in range(1, 4):
+                conn.execute(
+                    """INSERT INTO memory_claim_evidence(
+                           claim_id,source_claim_id,relation,weight
+                       ) VALUES('l3-structure',?,'supports',1.0)""",
+                    (f"l2-source-{index}",),
+                )
+
+        graph = LearningMemoryService(self.store).l3_profile_graph()
+        node_types = {item["type"] for item in graph["nodes"]}
+        relations = {item["relation"] for item in graph["edges"]}
+        self.assertIn("l3_pattern", node_types)
+        self.assertIn("l2_hypothesis", node_types)
+        self.assertIn("context", node_types)
+        self.assertIn("generalized_from", relations)
+        self.assertEqual(graph["applicable_patterns"][0]["claim_id"], "l3-structure")
+
+        captured = {}
+
+        def fake_understanding_agent_json(system, user, **kwargs):
+            captured["system"] = system
+            captured["prompt"] = user
+            return ({
+                "primary_intent": "explain_mechanism", "concepts": ["注意力机制"],
+                "task_demand": "analyze", "possible_obstacle": "causal_gap",
+                "evidence": "当前问题要求解释机制。", "core_question": "为什么注意力机制有效？",
+                "profile_graph_claim_ids_used": ["l3-structure", "invented-claim"],
+                "profile_graph_rationale": "用已验证的结构偏好消解讲解顺序。",
+            }, "glm:test")
+
+        with patch("core.gardener_graph._understanding_agent_json", side_effect=fake_understanding_agent_json):
+            understood = understand_question({
+                "store": self.store, "question": "为什么注意力机制有效？",
+                "dialogue": "", "history": [], "trace": [],
+            })
+        self.assertNotIn("l3-structure", captured["prompt"])
+        self.assertIn("不读取或推断学习画像", captured["system"])
+        self.assertIn("例：", captured["system"])
+        self.assertEqual(understood["intent"]["profile_graph_claim_ids_used"], [])
+        self.assertEqual(understood["trace"][-1]["data"]["understanding_provider"], "glm:test")
+        self.assertEqual(understood["profile_graph"]["applicable_patterns"][0]["claim_id"], "l3-structure")
+
     def test_knowledge_access_changes_value_without_automatic_deletion(self):
         memory = LearningMemoryService(self.store)
         active_id, _ = self.store.upsert_note({
@@ -634,6 +735,68 @@ class GardenTests(unittest.TestCase):
         self.assertNotIn("BAD", json.dumps(diagram))
         self.assertNotIn("script", json.dumps(diagram))
 
+    def test_full_deepdiagram_mermaid_parser_keeps_declared_labels(self):
+        code = '''flowchart LR
+            CQ["Compare Alpha and Beta<br/>[core question]"]
+            CQ --> A["Uses Method One [W1]"]
+            CQ --> B["Uses Method Two [W2]"]
+        </code'''
+        nodes, edges = _parse_mermaid(code)
+        labels = {item["id"]: item["label"] for item in nodes}
+        self.assertEqual(labels["A"], "Uses Method One")
+        self.assertEqual(labels["B"], "Uses Method Two")
+        evidence = {item["id"]: item["evidence_ids"] for item in nodes}
+        self.assertEqual(evidence["A"], ["W1"])
+        self.assertEqual(evidence["B"], ["W2"])
+        self.assertIn("Compare Alpha and Beta", labels["CQ"])
+        self.assertEqual({item["source"] for item in edges}, {"CQ"})
+
+    def test_full_comparison_graph_restores_two_subject_anchors(self):
+        nodes, edges = _structure_comparison_graph(
+            [
+                {"id": "CQ", "label": "Compare Alpha and Beta · [core question]", "role": "concept", "evidence_ids": []},
+                {"id": "A", "label": "Uses Method One", "role": "concept", "evidence_ids": ["W1"]},
+                {"id": "B", "label": "Uses Method Two", "role": "concept", "evidence_ids": ["W2"]},
+            ],
+            [{"source": "CQ", "target": "A", "label": ""}],
+            {
+                "core_question": "Compare Alpha and Beta",
+                "comparison_subjects": ["Alpha", "Beta"],
+                "evidence_items": [
+                    {"source_id": "W1", "excerpt": "Alpha uses Method One"},
+                    {"source_id": "W2", "excerpt": "Beta uses Method Two"},
+                ],
+            },
+        )
+        self.assertEqual([item["label"] for item in nodes[:2]], ["Alpha", "Beta"])
+        self.assertEqual([item["role"] for item in nodes[:2]], ["anchor", "anchor"])
+        self.assertTrue(all(item["label"] != "Compare Alpha and Beta · [core question]" for item in nodes))
+        self.assertEqual({item["label"] for item in edges}, {"比较维度"})
+
+    def test_full_comparison_graph_reuses_existing_subject_nodes(self):
+        nodes, edges = _parse_mermaid('''graph LR
+            Q["Compare Synthetic Gamma &amp; Delta"]
+            Q --> G["Gamma"]
+            Q --> D["Delta"]
+            G --> GP["Pattern One [W1]"]
+            D --> DP["Pattern Two [W2]"]
+        </code''')
+        nodes, edges = _structure_comparison_graph(
+            nodes, edges,
+            {
+                "core_question": "Compare synthetic Gamma and Delta",
+                "comparison_subjects": ["Gamma", "Delta"],
+                "evidence_items": [
+                    {"source_id": "W1", "excerpt": "Gamma uses Pattern One"},
+                    {"source_id": "W2", "excerpt": "Delta uses Pattern Two"},
+                ],
+            },
+        )
+        self.assertEqual([item["label"] for item in nodes].count("Gamma"), 1)
+        self.assertEqual([item["label"] for item in nodes].count("Delta"), 1)
+        self.assertNotIn("Compare Synthetic Gamma & Delta", [item["label"] for item in nodes])
+        self.assertIn("W1", next(item for item in nodes if item["label"] == "Pattern One")["evidence_ids"])
+
     def test_evidence_gate_blocks_factual_generation_without_direct_source(self):
         state = {
             "evidence_review": {"sufficient": False, "gaps": ["没有直接证据"]},
@@ -644,6 +807,208 @@ class GardenTests(unittest.TestCase):
         model.assert_not_called()
         self.assertIn("证据不足", result["answer"])
         self.assertIn("硬门控", result["trace"][-1]["summary"])
+
+    def test_factual_definition_cannot_be_silently_downgraded_to_local_only(self):
+        state = {
+            "question": "人因学是不是新兴学科？请说明它的定义和发展历史。",
+            "intent": {
+                "primary_intent": "define", "research_object": "人因学",
+                "core_question": "人因学的定义和发展历史", "concepts": ["人因学"],
+                "longitudinal_questions": ["人因学如何形成并发展？"],
+                "response_mode": "standard",
+            },
+            "trace": [],
+        }
+        with patch("core.gardener_graph._agent_json", return_value={
+            "goal": "解释人因学", "complexity": "moderate", "required_steps": [],
+            "primary_modality": "text", "relation_type": "none", "visual_kind": "none",
+            "modality_reason": "文字即可", "visual_request": "", "online_research": False,
+            "reflection_required": True, "max_revisions": 1, "stop_condition": "完成回答",
+        }):
+            planned = planner_plan(state)["planner_decision"]
+        self.assertTrue(planned["online_research"])
+        source_state = {**state, "planner_decision": planned, "history": []}
+        source_plan = plan_sources(source_state)["source_plan"]
+        self.assertIn("encyclopedia", source_plan["source_types"])
+        self.assertIn("review", source_plan["source_types"])
+        self.assertIn("research_paper", source_plan["source_types"])
+
+    def test_question_subject_reduces_a_full_chinese_question_to_the_term(self):
+        self.assertEqual(
+            _question_subject("人因学是不是新兴学科？请说明它的定义、历史与核心议题。"),
+            "人因学",
+        )
+        self.assertEqual(_question_subject("什么是人因学"), "人因学")
+
+    def test_simple_definition_uses_planner_fast_path_without_second_model_call(self):
+        state = {
+            "question": "什么是人因学",
+            "intent": {
+                "primary_intent": "define", "secondary_intents": [],
+                "research_object": "人因学", "core_question": "人因学是什么",
+                "claim_to_verify": "", "response_mode": "standard", "concepts": ["人因学"],
+            },
+            "trace": [],
+        }
+        with patch("core.gardener_graph._agent_json") as model:
+            result = planner_plan(state)
+        model.assert_not_called()
+        self.assertEqual(result["planner_decision"]["complexity"], "simple")
+        self.assertTrue(result["planner_decision"]["online_research"])
+        self.assertEqual(result["trace"][-1]["data"]["planning_mode"], "deterministic_fast_path")
+
+    def test_unconfigured_glm_uses_safe_millisecond_definition_parser(self):
+        with patch("core.gardener_graph._understanding_agent_json") as model:
+            result = understand_question({
+                "store": self.store, "question": "什么是人因学",
+                "dialogue": "", "history": [], "trace": [],
+            })
+        model.assert_not_called()
+        self.assertEqual(result["intent"]["research_object"], "人因学")
+        self.assertEqual(
+            result["trace"][-1]["data"]["understanding_provider"],
+            "deterministic-simple-definition",
+        )
+
+    def test_understanding_fallback_routes_numeric_foundation_question_as_apply(self):
+        with patch("core.gardener_graph._understanding_agent_json", return_value=(
+            None, "deterministic-fallback-after-glm-unavailable",
+        )):
+            result = understand_question({
+                "store": self.store,
+                "question": "一个三节点网络需要列写多少个线性独立的KCL方程？",
+                "dialogue": "", "history": [], "trace": [],
+            })
+        self.assertEqual(result["intent"]["primary_intent"], "apply")
+        self.assertEqual(result["intent"]["query_plan"]["subject_mode"], "foundational")
+
+    def test_understanding_enum_drift_does_not_discard_valid_subject(self):
+        payload = {
+            "primary_intent": "获取定义", "research_object": "人因学",
+            "core_question": "人因学的基本定义", "concepts": ["人因学", "用户未提到的概念"],
+            "task_demand": "用户希望了解定义", "possible_obstacle": "概念可能混淆",
+            "needs_clarification": False, "confidence": 0.95,
+        }
+        with patch("core.gardener_graph._understanding_agent_json", return_value=(payload, "glm:test")):
+            result = understand_question({
+                "store": self.store, "question": "请介绍人因学的基本定义",
+                "dialogue": "", "history": [], "trace": [],
+            })
+        self.assertEqual(result["intent"]["primary_intent"], "define")
+        self.assertEqual(result["intent"]["task_demand"], "understand")
+        self.assertEqual(result["intent"]["research_object"], "人因学")
+        self.assertEqual(result["intent"]["concepts"], ["人因学"])
+
+    def test_standalone_question_keeps_original_query_when_agent_subject_drifts(self):
+        question = "一个三节点网络需要列写多少个线性独立的KCL方程？"
+        payload = {
+            "primary_intent": "define",
+            "research_object": "一阶微分方程",
+            "core_question": "一阶微分方程是什么",
+            "concepts": [],
+            "needs_clarification": False,
+            "confidence": 0.7,
+        }
+        with patch("core.gardener_graph._understanding_agent_json", return_value=(payload, "glm:test")):
+            result = understand_question({
+                "store": self.store, "question": question,
+                "dialogue": "", "history": [], "trace": [],
+            })
+        query_plan = result["intent"]["query_plan"]
+        self.assertEqual(query_plan["resolved"], question)
+        self.assertEqual(query_plan["queries"][0]["text"], question)
+
+    def test_understanding_normalizes_descriptive_clarification_string(self):
+        payload = {
+            "primary_intent": "compare",
+            "research_object": "人因学与工程心理学",
+            "core_question": "人因学和工程心理学有什么区别",
+            "concepts": ["人因学", "工程心理学"],
+            "needs_clarification": "不需要，最近上文已明确指出人因学",
+            "confidence": "0.9",
+        }
+        with patch("core.gardener_graph._understanding_agent_json", return_value=(payload, "glm:test")):
+            result = understand_question({
+                "store": self.store, "question": "它和工程心理学有什么区别？",
+                "dialogue": "用户：我正在了解人因学。", "history": [
+                    {"role": "user", "content": "我正在了解人因学。"},
+                ], "trace": [],
+            })
+        self.assertFalse(result["intent"]["needs_clarification"])
+        self.assertEqual(result["intent"]["research_object"], "人因学与工程心理学")
+
+    def test_glm_failure_uses_narrow_contextual_pronoun_fallback(self):
+        with patch("core.gardener_graph._understanding_agent_json", return_value=(
+            None, "deterministic-fallback-after-glm-unavailable",
+        )):
+            result = understand_question({
+                "store": self.store, "question": "它和工程心理学有什么区别？",
+                "dialogue": "用户：我正在了解人因学。", "history": [
+                    {"role": "user", "content": "什么是人因学？"},
+                ], "trace": [],
+            })
+        self.assertEqual(result["intent"]["primary_intent"], "compare")
+        self.assertEqual(result["intent"]["research_object"], "人因学与工程心理学")
+        self.assertEqual(result["intent"]["concepts"], ["人因学", "工程心理学"])
+        self.assertFalse(result["intent"]["needs_clarification"])
+
+    def test_top_encyclopedia_canonical_title_can_define_short_alias(self):
+        state = {
+            "question": "什么是人因学",
+            "intent": {
+                "primary_intent": "define", "research_object": "人因学",
+                "core_question": "什么是人因学", "claim_to_verify": "",
+                "concepts": ["人因学"], "response_mode": "standard",
+            },
+            "planner_decision": {"complexity": "simple"},
+            "source_plan": {"search_query": "人因学"},
+            "wechat_lookup": {"requested": False},
+            "candidate_sources": [{
+                "source_id": "W1", "title": "人因工程学",
+                "text": "人因工程学研究人与环境及系统之间的相互作用，并使系统适合人的能力和限制。",
+                "source_type": "encyclopedia", "authority": "orientation",
+                "local": False, "knowledge_status": "grounded", "access_scope": "abstract",
+                "retrieval_rank": 1,
+            }],
+            "trace": [],
+        }
+        result = audit_evidence(state)
+        self.assertTrue(result["evidence_review"]["sufficient"])
+        self.assertEqual(result["evidence_review"]["source_roles"]["W1"], "direct_evidence")
+
+    def test_evidence_failure_reports_whether_online_lookup_was_attempted(self):
+        state = {
+            "evidence_review": {"sufficient": False, "gaps": ["没有直接证据"]},
+            "retrieval_attempts": ["Wikipedia", "OpenAlex/Crossref"],
+            "retrieval_errors": ["OpenAlex:RuntimeError"],
+            "accepted_sources": [], "trace": [],
+        }
+        result = generate_answer(state)
+        self.assertIn("已发出联网查询", result["answer"])
+        self.assertNotIn("已完成本地知识、教材入口和可用权威来源的检索", result["answer"])
+
+    def test_simple_answer_repairs_missing_direct_citation_without_reflector_retry(self):
+        state = {
+            "question": "什么是人因学",
+            "intent": {"primary_intent": "define", "response_mode": "standard"},
+            "teaching_strategy": {"teaching_move": "direct_definition"},
+            "evidence_review": {
+                "sufficient": True, "source_roles": {"W1": "direct_evidence"},
+                "usable_claims": [], "gaps": [],
+            },
+            "accepted_sources": [{
+                "source_id": "W1", "title": "人因工程学", "source_type": "encyclopedia",
+                "text": "人因工程学研究人与系统的交互。",
+            }],
+            "retrieval_errors": [], "trace": [],
+        }
+        with patch("core.gardener_graph._agent_json", return_value={
+            "answer": "人因学研究人与系统之间的相互作用。",
+            "followup": "", "discussion_prompts": [],
+        }):
+            result = generate_answer(state)
+        self.assertIn("[W1]", result["answer"])
+        self.assertTrue(result["trace"][-1]["data"]["citation_binding_repaired"])
 
     def test_audit_does_not_promote_same_domain_textbook_without_object_match(self):
         state = {
@@ -672,6 +1037,58 @@ class GardenTests(unittest.TestCase):
         self.assertFalse(result["evidence_review"]["sufficient"])
         self.assertEqual(result["evidence_review"]["source_roles"]["L1"], "prerequisite")
 
+    def test_audit_accepts_strong_reranked_textbook_for_compositional_foundation_question(self):
+        state = {
+            "question": "一个三节点网络需要列写多少个线性独立的KCL方程？",
+            "intent": {
+                "primary_intent": "apply",
+                "research_object": "三节点网络的线性独立KCL方程数量",
+                "core_question": "三节点网络需要多少个线性独立KCL方程",
+                "claim_to_verify": "",
+                "concepts": [],
+                "response_mode": "standard",
+            },
+            "planner_decision": {"complexity": "moderate"},
+            "source_plan": {"search_query": "三节点网络 线性独立 KCL 方程"},
+            "wechat_lookup": {"requested": False},
+            "candidate_sources": [{
+                "source_id": "T1", "title": "电路分析教材 · 第 109 页",
+                "text": "对于包含 N 个节点的网络，只需要列写 N-1 个线性独立的节点方程。" * 4,
+                "source_type": "textbook", "authority": "local_textbook",
+                "local": True, "knowledge_status": "grounded", "access_scope": "full_text",
+                "note": {"reranker_score": 0.88, "reranker_rank": 4},
+            }],
+            "trace": [],
+        }
+        result = audit_evidence(state)
+        self.assertTrue(result["evidence_review"]["sufficient"])
+        self.assertEqual(result["evidence_review"]["source_roles"]["T1"], "direct_evidence")
+
+    def test_audit_rejects_strong_reranker_without_auditable_term_overlap(self):
+        state = {
+            "question": "节点1相对于节点2的电压是多少？",
+            "intent": {
+                "primary_intent": "apply", "research_object": "节点间电压",
+                "core_question": "节点1相对于节点2的电压", "claim_to_verify": "",
+                "concepts": [], "response_mode": "standard",
+                "query_plan": {"aliases": ["node voltage", "reference node"]},
+            },
+            "planner_decision": {"complexity": "moderate"},
+            "source_plan": {"search_query": "节点电压 node voltage"},
+            "wechat_lookup": {"requested": False},
+            "candidate_sources": [{
+                "source_id": "T1", "title": "山岳文学 · 第 157 页",
+                "text": "地图用阴影和等高线表示山脉、坡度与地形。" * 8,
+                "source_type": "textbook", "authority": "local_textbook",
+                "local": True, "knowledge_status": "grounded", "access_scope": "full_text",
+                "note": {"reranker_score": 0.98, "reranker_rank": 1},
+            }],
+            "trace": [],
+        }
+        result = audit_evidence(state)
+        self.assertFalse(result["evidence_review"]["sufficient"])
+        self.assertEqual(result["evidence_review"]["source_roles"]["T1"], "prerequisite")
+
     def test_planner_selects_spatial_concept_diagram_for_vector_question(self):
         plan = _fallback_planner(
             "为什么特征向量在线性变换后方向不变？请配图。",
@@ -699,6 +1116,80 @@ class GardenTests(unittest.TestCase):
         self.assertEqual(diagram["status"], "ready")
         self.assertEqual(diagram["provider"], "local-deterministic-adapter")
         self.assertIn("connection refused", diagram["warning"])
+
+    def test_comparison_fallback_draws_two_subjects_and_removes_vault_markup(self):
+        diagram = build_local_diagram(
+            {
+                "research_object": "人因学与技术伦理的核心区别",
+                "core_question": "人因学与技术伦理的核心区别是什么？",
+                "comparison_subjects": ["人因学", "技术伦理"],
+                "direct_source_ids": ["W1", "W2"],
+                "evidence_items": [
+                    {
+                        "source_id": "W1", "title": "人因学",
+                        "excerpt": "人因学研究人、任务、技术与环境构成的系统。",
+                    },
+                    {
+                        "source_id": "W2", "title": "技术伦理",
+                        "excerpt": "技术伦理关注技术设计与使用中的价值、责任和风险。",
+                    },
+                    {
+                        "source_id": "W2", "title": "坏的元数据",
+                        "excerpt": "# 被误解的集体主义文化 | 降维对照 > 来源：旧页面.md",
+                    },
+                ],
+                "usable_claims": [], "gaps": [],
+            },
+            requested_kind="comparison",
+            allowed_source_ids={"W1", "W2"},
+            fallback_reason="full service unavailable",
+        )
+        labels = [node["label"] for node in diagram["nodes"]]
+        self.assertEqual(diagram["status"], "ready")
+        self.assertIn("人因学", labels)
+        self.assertIn("技术伦理", labels)
+        self.assertGreaterEqual(len(labels), 4)
+        serialized = json.dumps(diagram, ensure_ascii=False)
+        self.assertNotIn("降维对照", serialized)
+        self.assertNotIn("来源：", serialized)
+        self.assertNotIn(".md", serialized)
+        self.assertTrue(any(edge["label"] != "对照" for edge in diagram["edges"]))
+
+    def test_reflector_rejects_shallow_comparison_and_decorative_diagram(self):
+        state = {
+            "question": "人因学与技术伦理的核心区别是什么？",
+            "intent": {
+                "primary_intent": "compare", "response_mode": "standard",
+                "concepts": ["人因学", "技术伦理"],
+            },
+            "planner_decision": {
+                "complexity": "moderate", "primary_modality": "text_visual",
+                "visual_kind": "comparison", "max_revisions": 1,
+            },
+            "evidence_review": {
+                "sufficient": True,
+                "source_roles": {"W1": "direct_evidence", "W2": "direct_evidence"},
+            },
+            "accepted_sources": [{"source_id": "W1"}, {"source_id": "W2"}],
+            "answer": "人因学研究人与系统，技术伦理研究价值问题。[W1][W2]",
+            "visualization": {
+                "status": "ready", "kind": "comparison", "provider": "local",
+                "title": "比较", "design_concept": "", "source_ids": ["W1"],
+                "nodes": [
+                    {"id": "a", "label": "人因学与技术伦理", "role": "anchor", "evidence_ids": []},
+                    {"id": "b", "label": "# 旧页 | 降维对照 > 来源：材料.md", "role": "concept", "evidence_ids": ["W1"]},
+                ],
+                "edges": [{"source": "a", "target": "b", "label": "对照"}],
+            },
+            "teaching_strategy": {}, "trace": [],
+        }
+        with patch("core.gardener_graph._agent_json", return_value=None):
+            result = review_answer(state)
+        review = result["quality_review"]
+        self.assertFalse(review["passed"])
+        self.assertEqual(review["repair_target"], "both")
+        self.assertTrue(any("比较回答过浅" in issue for issue in review["issues"]))
+        self.assertTrue(any("Markdown" in issue for issue in review["issues"]))
 
     def test_low_risk_reflector_uses_local_hard_checks_only(self):
         state = {
@@ -965,6 +1456,47 @@ class GardenTests(unittest.TestCase):
         with patch("core.agent.search_academic_articles", return_value=[article]):
             circuit = daily_digest(self.store, force=False)
         self.assertEqual(circuit["items"][0]["interest"], "电子电路")
+
+    def test_academic_search_falls_back_to_crossref_with_diagnostics(self):
+        crossref_payload = {"message": {"items": [{
+            "DOI": "10.1234/garden.2026", "title": ["A useful fallback article"],
+            "author": [{"given": "Ada", "family": "Lovelace"}],
+            "container-title": ["Garden Journal"], "abstract": "<jats:p>Useful abstract.</jats:p>",
+            "published-online": {"date-parts": [[2026, 8, 20]]},
+            "is-referenced-by-count": 7,
+        }]}}
+        diagnostics = {}
+        with patch("core.web_research._request_json_with_retry", side_effect=[OSError("OpenAlex down"), crossref_payload]):
+            articles = search_academic_articles("learning", limit=2, diagnostics=diagnostics)
+        self.assertEqual(articles[0]["source"], "Crossref / DOI")
+        self.assertEqual(articles[0]["year"], 2026)
+        self.assertEqual(diagnostics["provider"], "Crossref")
+        self.assertTrue(diagnostics["degraded"])
+        self.assertIn("OpenAlex", diagnostics["errors"][0])
+
+    def test_daily_digest_does_not_cache_transient_empty_failure(self):
+        self.store.set_setting("learning_level", "本科入门")
+        self.store.set_setting("interests", ["AI"])
+        with patch("core.agent.search_academic_articles", side_effect=RuntimeError("all providers unavailable")) as search:
+            first = daily_digest(self.store, force=False)
+            second = daily_digest(self.store, force=False)
+        self.assertEqual(first["items"], [])
+        self.assertIn("RuntimeError", first["message"])
+        self.assertEqual(second["items"], [])
+        self.assertEqual(search.call_count, 2)
+
+    def test_daily_digest_deduplicates_same_title_with_different_urls(self):
+        self.store.set_setting("interests", ["AI"])
+        base = {
+            "title": "The Same Research Article", "year": 2026, "authors": ["A"],
+            "venue": "Journal", "source": "OpenAlex", "abstract": "Artificial intelligence cognitive science.",
+        }
+        with patch("core.agent.search_academic_articles", return_value=[
+            {**base, "url": "https://doi.org/10.1/a"},
+            {**base, "url": "https://openalex.org/W123"},
+        ]):
+            result = daily_digest(self.store, force=True)
+        self.assertEqual(len(result["items"]), 1)
 
     def test_graph_merges_normalized_duplicate_titles_without_deleting_notes(self):
         first_id, _ = self.store.upsert_note({

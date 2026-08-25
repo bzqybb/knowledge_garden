@@ -175,7 +175,11 @@ function candidateArray(value) {
   return [];
 }
 
-function recentLabel(item) { return item.m_nsNickName || item.displayName || item.name || item.nickname || item.remark || item.talker || item.wechatNickname || item.m_nsUsrName || item.username || item.wxid || item.md5 || "未命名会话"; }
+function recentLabel(item) {
+  const names = [item.display_name, item.m_nsNickName, item.displayName, item.wechatNickname, item.nickname, item.name, item.remark, item.account_name, item.talker];
+  const humanName = names.map(value => String(value || "").trim()).find(value => value && !/^(?:gh_[a-z0-9]+(?:@app)?|wxid_[a-z0-9_]+|[a-f0-9]{24,64})$/i.test(value));
+  return humanName || "暂未识别真实名称";
+}
 
 async function loadOfficialAccounts() {
   busy(true, "正在从本地微信识别公众号……");
@@ -187,7 +191,8 @@ async function loadOfficialAccounts() {
       const name = recentLabel(item);
       return `<option value="${escapeHTML(name)}">${escapeHTML(name)}</option>`;
     }).join("");
-    $("#wechat-official-summary").innerHTML = `<b>已识别 ${officialAccounts.length} 个公众号</b><small>这里只读取公众号文章卡片，不扫描普通联系人和群聊。</small>`;
+    const unresolved = Number(data.result?.unresolved_count || 0);
+    $("#wechat-official-summary").innerHTML = `<b>已识别 ${officialAccounts.length} 个公众号</b><small>这里只展示已经识别出真实昵称的公众号，不扫描普通联系人和群聊。${unresolved ? `另有 ${unresolved} 个账号暂未取得真实名称，已隐藏内部标识。` : ""}</small>`;
   } catch (err) { toast(err.message, true); } finally { busy(false); }
 }
 
@@ -238,7 +243,16 @@ async function hydrateOfficialArticlePreviews() {
 }
 
 function renderOfficialArticles(result) {
-  officialArticles = result.articles || [];
+  const accountName = result.account_name || result.contact?.m_nsNickName || result.talker || "未命名公众号";
+  result = {...result, account_name: accountName, talker: accountName};
+  officialArticles = (result.articles || []).map(message => {
+    const article = message.article || {};
+    const articleAccount = article.account_name || message.account_name || accountName;
+    return {...message, account_name: articleAccount, sender: articleAccount, article: {
+      ...article, original_publisher: article.publisher || "", account_name: articleAccount,
+      publisher: articleAccount || article.publisher || "",
+    }};
+  });
   const host = $("#wechat-article-inbox");
   host.innerHTML = `<article class="panel official-inbox-panel"><div class="panel-head"><div><span class="kicker">ARTICLE INBOX</span><h3>${escapeHTML(result.talker)} · ${officialArticles.length} 篇</h3><small>最近 ${escapeHTML(result.days)} 天${result.truncated ? " · 消息较多，已限制本轮读取量" : ""}</small></div></div><div class="wechat-message-list official-article-list">${officialArticles.length ? officialArticles.map((message,index)=>{const article=message.article||{},quick=quickArticleMeta(article),cached=officialArticlePreviews.get(article.url)||{};const preview={...quick,...cached,knowledge:cached.knowledge||quick.knowledge};return `<article class="wechat-message official-article-card"><div class="official-article-main"><div class="official-article-source"><small>${escapeHTML(article.publisher||message.sender||result.talker)} · ${escapeHTML(message.sent_at||"")}</small><small id="official-status-${index}">${cached.summary_source ? `${escapeHTML(cached.summary_source)} · ${escapeHTML(cached.classification_status||"初步识别")}` : "正在回源读取正文信息…"}</small></div><h4>${escapeHTML(article.title||"未命名文章")}</h4><div class="official-article-meta"><span id="official-domain-${index}">领域 · ${escapeHTML(preview.domain)}</span><span id="official-reading-${index}">${preview.reading_minutes ? `预计阅读 · ${preview.reading_minutes} 分钟` : "预计阅读 · 正在计算"}</span></div><p class="official-article-summary" id="official-summary-${index}"><b>文章摘要</b>${escapeHTML(preview.summary||article.description||"正在读取正文，以生成可判断内容价值的摘要…")}</p><div class="official-knowledge" id="official-knowledge-${index}"><b>涉及知识</b>${preview.knowledge.length ? preview.knowledge.map(item=>`<span>${escapeHTML(item)}</span>`).join("") : "<span>正在从正文提取</span>"}</div><div class="button-row official-article-actions"><a class="secondary" href="${escapeHTML(safeURL(article.url))}" target="_blank" rel="noopener noreferrer">阅读原文</a><button class="primary official-guide" data-index="${index}" type="button">读取正文并互动导读</button><button class="text-btn official-queue" data-index="${index}" type="button">加入待审核区</button></div></div></article>`}).join("") : '<div class="empty">这个公众号在所选时间内没有返回文章卡片，可以扩大到最近 90 天。</div>'}</div></article>`;
   $$(".official-guide").forEach(button => button.onclick = () => startOfficialReading(Number(button.dataset.index)));
@@ -250,7 +264,7 @@ async function startOfficialReading(index) {
   const message = officialArticles[index];
   const article = message?.article || {};
   if (!article.url) return;
-  readingArticle = {title:article.title||"这篇公众号文章",url:article.url,publisher:article.publisher||message.sender||"",sentAt:message.sent_at||"",text:"",scope:"open_fulltext"};
+  readingArticle = {title:article.title||"这篇公众号文章",url:article.url,publisher:article.account_name||article.publisher||message.account_name||message.sender||"",sentAt:message.sent_at||"",text:"",scope:"open_fulltext"};
   readingConversation = [];
   readingSessionId = crypto.randomUUID();
   $("#reading-title").textContent = readingArticle.title;
@@ -329,10 +343,10 @@ async function queueOfficialArticle(index, result) {
   busy(true, "正在把公众号文章放入 L1 待审核区……");
   try {
     await api("/api/wechat/candidates", {method:"POST", body:JSON.stringify({
-      title: article.title || `${result.talker} · 公众号文章`,
-      talker: result.talker, time: message.sent_at || "",
+      title: article.title || `${result.account_name||result.talker} · 公众号文章`,
+      talker: result.account_name||result.talker, time: message.sent_at || "",
       contact: result.contact || {}, query: {source:"official_account", article:{
-        title:article.title||"", url:article.url||"", publisher:article.publisher||message.sender||result.talker,
+        title:article.title||"", url:article.url||"", account_name:article.account_name||result.account_name||"", publisher:article.publisher||article.account_name||message.sender||result.account_name||result.talker,
         description:article.description||"", sent_at:message.sent_at||"", preview:article.preview||null
       }}, messages:[message],
     })});
@@ -421,7 +435,7 @@ function renderFeeds() {
   host.innerHTML = feeds.length ? feeds.map(f => `<div class="feed-item"><div><b>${escapeHTML(f.name)}</b><small>${escapeHTML(f.url)}</small></div><span class="chip">追踪中</span></div>`).join("") : '<div class="empty">添加技术博主的 RSS 地址，更新就会进入花园。</div>';
 }
 
-async function loadDaily(force=false){try{const data=await api(`/api/daily${force?"?refresh=1":""}`);dailyItems=data.items||[];$("#daily-profile").textContent=data.interests?.length?`垂类画像：${data.level} · ${data.interests.join(" / ")}`:"还没有设置兴趣画像";$("#daily-digest").innerHTML=dailyItems.length?dailyItems.map((item,index)=>{const g=item.reading_guide||{},scores=item.scores||{},links=(item.connections||[]).map(c=>`《${escapeHTML(c.title)}》`).join("、");return `<article class="daily-card ${item.read?"is-read":""}"><span>${escapeHTML(item.interest||"前沿推荐")} · ${escapeHTML(item.year||"")} ${item.read?"· 已读":""}</span><h4><a href="${escapeHTML(safeURL(item.url))}" target="_blank" rel="noopener noreferrer">${escapeHTML(item.title)}</a></h4><p>${escapeHTML(item.why)}</p>${links?`<small>知识树连接：${links}</small>`:""}<div class="frontier-scores"><span>领域 ${Math.round((scores.domain_match||0)*100)}%</span><span>衔接 ${Math.round((scores.knowledge_connection||0)*100)}%</span><span>来源 ${Math.round((scores.source_quality||0)*100)}%</span><span>新鲜 ${Math.round((scores.freshness||0)*100)}%</span></div><details class="reading-guide"><summary>打开互动导读</summary><div><b>读前 · 先预测</b><p>${escapeHTML(g.before_reading||"")}</p><b>方向提示</b><p>${escapeHTML(g.orientation||"")}</p><b>读中检查点</b><ol>${(g.checkpoints||[]).map(q=>`<li>${escapeHTML(q)}</li>`).join("")}</ol><b>读后 · 带走什么</b><p>${escapeHTML(g.after_reading||"")}</p></div></details><div class="daily-actions"><button class="primary" onclick="askDaily(${index})">开始互动导读</button><button class="secondary" onclick="markDailyRead(${index})" ${item.read?"disabled":""}>${item.read?"已标记阅读":"标记已读"}</button><button class="text-btn" onclick="saveDaily(${index})">确认加入知识库</button></div></article>`}).join(""):`<div class="empty">${escapeHTML(data.message||"今天暂时没有推荐。")}</div>`}catch(err){$("#daily-digest").innerHTML=`<div class="empty">每日推送暂时不可用：${escapeHTML(err.message)}</div>`}}
+async function loadDaily(force=false){try{const data=await api(`/api/daily${force?"?refresh=1":""}`);dailyItems=data.items||[];$("#daily-profile").textContent=data.interests?.length?`垂类画像：${data.level} · ${data.interests.join(" / ")}`:"还没有设置兴趣画像";const notice=data.notice?`<div class="source-notice">${escapeHTML(data.notice)}</div>`:"";$("#daily-digest").innerHTML=notice+(dailyItems.length?dailyItems.map((item,index)=>{const g=item.reading_guide||{},scores=item.scores||{},links=(item.connections||[]).map(c=>`《${escapeHTML(c.title)}》`).join("、");return `<article class="daily-card ${item.read?"is-read":""}"><span>${escapeHTML(item.interest||"前沿推荐")} · ${escapeHTML(item.year||"")} ${item.read?"· 已读":""}</span><h4><a href="${escapeHTML(safeURL(item.url))}" target="_blank" rel="noopener noreferrer">${escapeHTML(item.title)}</a></h4><p>${escapeHTML(item.why)}</p>${links?`<small>知识树连接：${links}</small>`:""}<div class="frontier-scores"><span>领域 ${Math.round((scores.domain_match||0)*100)}%</span><span>衔接 ${Math.round((scores.knowledge_connection||0)*100)}%</span><span>来源 ${Math.round((scores.source_quality||0)*100)}%</span><span>新鲜 ${Math.round((scores.freshness||0)*100)}%</span></div><details class="reading-guide"><summary>打开互动导读</summary><div><b>读前 · 先预测</b><p>${escapeHTML(g.before_reading||"")}</p><b>方向提示</b><p>${escapeHTML(g.orientation||"")}</p><b>读中检查点</b><ol>${(g.checkpoints||[]).map(q=>`<li>${escapeHTML(q)}</li>`).join("")}</ol><b>读后 · 带走什么</b><p>${escapeHTML(g.after_reading||"")}</p></div></details><div class="daily-actions"><button class="primary" onclick="askDaily(${index})">开始互动导读</button><button class="secondary" onclick="markDailyRead(${index})" ${item.read?"disabled":""}>${item.read?"已标记阅读":"标记已读"}</button><button class="text-btn" onclick="saveDaily(${index})">确认加入知识库</button></div></article>`}).join(""):`<div class="empty">${escapeHTML(data.message||"今天暂时没有推荐。")}</div>`)}catch(err){$("#daily-digest").innerHTML=`<div class="empty">每日推送暂时不可用：${escapeHTML(err.message)}</div>`}}
 function askDaily(index){const item=dailyItems[index];if(!item)return;switchView("home");const material=`<frontier_material>\ntitle: ${item.title||""}\nurl: ${item.url||""}\npdf_url: ${item.pdf_url||""}\nauthors: ${(item.authors||[]).join("; ")}\nvenue: ${item.venue||""}\nyear: ${item.year||""}\naccess_scope: ${item.abstract?"abstract":"metadata_only"}\nabstract:\n${item.abstract||""}\n</frontier_material>`;$("#agent-ask-input").value=`${item.prompt}\n\n${material}`;$("#agent-ask-input").focus();toast("巡视材料及来源已带入输入框；你可以修改导读要求后再发送")}
 async function saveDaily(index){const item=dailyItems[index];if(!item)return;busy(true,"正在把推荐资料种入知识库并建立学习入口……");try{await api("/api/daily/save",{method:"POST",body:JSON.stringify(item)});toast("推荐资料已加入知识库，并进入知识编译流程");await bootstrap();await loadGarden()}catch(err){toast(err.message,true)}finally{busy(false)}}
 async function markDailyRead(index){const item=dailyItems[index];if(!item)return;try{await api("/api/daily/read",{method:"POST",body:JSON.stringify({url:item.url,title:item.title})});item.read=true;toast("已记录阅读，之后的推荐会避开重复材料 +2 XP");await loadDaily()}catch(err){toast(err.message,true)}}

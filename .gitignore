@@ -33,3 +33,23 @@ Thumbs.db
 outputs/
 temp/
 tmp/
+
+# Obsidian 的个人工作区和缓存，不影响需要协作的知识笔记。
+.obsidian/workspace*
+.obsidian/cache
+.obsidian/plugins/
+
+# 本机密钥与开发环境。
+.env
+.env.*
+!.env.example
+.idea/
+
+# 演示文稿构建缓存、Office 锁文件和本地评测产物。
+.ppt-build/
+evals/reports/
+*.inspect.ndjson
+~$*.pptx
+
+# Local third-party runtime downloaded by the DeepDiagram installer.
+vendor/

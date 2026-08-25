@@ -6,6 +6,7 @@ param(
     [Alias("KimiBaseUrl")]
     [string]$JudgeBaseUrl = "",
     [string]$JudgeModel = "",
+    [string]$Dataset = "",
     [string]$InputReport = "",
     [switch]$CheckJudge,
     [switch]$ResumeScores,
@@ -39,6 +40,7 @@ $arguments = @("-m", "evals.run_eval")
 if ($RetrievalOnly) { $arguments += "--retrieval-only" }
 if ($SkipJudge) { $arguments += "--skip-judge" }
 if ($Limit -gt 0) { $arguments += @("--limit", [string]$Limit) }
+if ($Dataset) { $arguments += @("--dataset", $Dataset) }
 if ($InputReport) { $arguments += @("--input-report", $InputReport) }
 if ($CheckJudge) { $arguments += "--check-judge" }
 if ($ResumeScores) { $arguments += "--resume-scores" }

@@ -73,6 +73,49 @@ elseif ($AskForApiKey) {
 }
 if (-not $env:GARDEN_BASE_URL) { $env:GARDEN_BASE_URL = "https://api.deepseek.com" }
 if (-not $env:GARDEN_MODEL) { $env:GARDEN_MODEL = "deepseek-v4-flash" }
+if (-not $env:DEEPDIAGRAM_BASE_URL) { $env:DEEPDIAGRAM_BASE_URL = "http://127.0.0.1:8000" }
+if (-not $env:DEEPDIAGRAM_TIMEOUT_SECONDS) { $env:DEEPDIAGRAM_TIMEOUT_SECONDS = "45" }
+
+# Start the installed DeepDiagram backend only when its local health check is
+# unavailable. It uses an isolated environment and SQLite; no knowledge-vault
+# content is scanned during startup.
+$deepDiagramBackend = Join-Path $projectRoot "vendor\DeepDiagram\backend"
+$deepDiagramPython = Join-Path $deepDiagramBackend ".venv\Scripts\python.exe"
+$deepDiagramReady = $false
+try {
+    $deepDiagramHealth = Invoke-RestMethod -Uri ($env:DEEPDIAGRAM_BASE_URL.TrimEnd('/') + "/") -TimeoutSec 2
+    $deepDiagramReady = $deepDiagramHealth.message -match "DeepDiagram"
+}
+catch {
+    $deepDiagramReady = $false
+}
+if (-not $deepDiagramReady -and (Test-Path -LiteralPath $deepDiagramPython)) {
+    New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+    $env:PYTHONUTF8 = "1"
+    $env:PYTHONIOENCODING = "utf-8"
+    Start-Process -FilePath $deepDiagramPython `
+        -ArgumentList @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000") `
+        -WorkingDirectory $deepDiagramBackend -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $runtimeDir "deepdiagram.log") `
+        -RedirectStandardError (Join-Path $runtimeDir "deepdiagram-error.log")
+    $deepDiagramDeadline = (Get-Date).AddSeconds(35)
+    do {
+        Start-Sleep -Milliseconds 500
+        try {
+            $deepDiagramHealth = Invoke-RestMethod -Uri ($env:DEEPDIAGRAM_BASE_URL.TrimEnd('/') + "/") -TimeoutSec 2
+            $deepDiagramReady = $deepDiagramHealth.message -match "DeepDiagram"
+        }
+        catch {
+            $deepDiagramReady = $false
+        }
+    } while (-not $deepDiagramReady -and (Get-Date) -lt $deepDiagramDeadline)
+}
+if ($deepDiagramReady) {
+    Write-Host "DeepDiagram full service connected." -ForegroundColor Green
+}
+else {
+    Write-Host "DeepDiagram full service unavailable; Garden will use its safe local diagram fallback." -ForegroundColor Yellow
+}
 Write-Host "Starting Knowledge Garden..." -ForegroundColor Green
 try {
     & $Python "app.py" --port $Port

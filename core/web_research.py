@@ -4,15 +4,19 @@ import json
 import ipaddress
 import re
 import socket
+import time
+from datetime import date
 from html import unescape
 from html.parser import HTMLParser
 from io import BytesIO
 from typing import Any
 from urllib.parse import urlencode, urlparse
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
 OPENALEX_API = "https://api.openalex.org/works"
+CROSSREF_API = "https://api.crossref.org/works"
 
 
 class _WeChatArticleParser(HTMLParser):
@@ -158,11 +162,85 @@ def fetch_wechat_article_text(url: str, *, timeout: int = 20, max_bytes: int = 1
     return text[:60_000]
 
 
+def _request_json_with_retry(request: Request, timeout: int, attempts: int = 2) -> dict[str, Any]:
+    last_error: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                return json.load(response)
+        except HTTPError as exc:
+            last_error = exc
+            if exc.code not in {429, 500, 502, 503, 504} or attempt + 1 >= attempts:
+                raise
+        except (URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            if attempt + 1 >= attempts:
+                raise
+        time.sleep(0.35 * (attempt + 1))
+    raise RuntimeError("在线学术检索失败") from last_error
+
+
+def _crossref_date(item: dict[str, Any]) -> tuple[str, int | None]:
+    parts = ((item.get("published-online") or item.get("published-print") or item.get("issued") or {}).get("date-parts") or [])
+    values = parts[0] if parts else []
+    if not values:
+        return "", None
+    padded = [*values[:3], 1, 1][:3]
+    return "-".join(f"{int(value):02d}" if index else f"{int(value):04d}" for index, value in enumerate(padded)), int(values[0])
+
+
+def _article_from_crossref(item: dict[str, Any]) -> dict[str, Any] | None:
+    title = str(next(iter(item.get("title") or []), "")).strip()
+    doi = str(item.get("DOI") or "").strip()
+    if not title or not doi:
+        return None
+    authors = []
+    for author in item.get("author") or []:
+        name = " ".join(part for part in [str(author.get("given") or "").strip(), str(author.get("family") or "").strip()] if part)
+        if name:
+            authors.append(name)
+        if len(authors) == 4:
+            break
+    publication_date, year = _crossref_date(item)
+    abstract = re.sub(r"<[^>]+>", " ", str(item.get("abstract") or ""))
+    abstract = re.sub(r"\s+", " ", unescape(abstract)).strip()[:1400]
+    return {
+        "title": title,
+        "url": f"https://doi.org/{doi}",
+        "year": year,
+        "authors": authors,
+        "venue": str(next(iter(item.get("container-title") or []), "")).strip(),
+        "abstract": abstract,
+        "cited_by_count": int(item.get("is-referenced-by-count") or 0),
+        "source": "Crossref / DOI",
+        "publication_date": publication_date,
+        "open_access": False,
+        "pdf_url": "",
+    }
+
+
+def _query_term_coverage(query: str, article: dict[str, Any]) -> float:
+    stop = {"recent", "research", "review", "learning", "applications", "application", "emerging", "technology"}
+    query_terms = {
+        token for token in re.findall(r"[a-z][a-z-]{3,}", query.lower()) if token not in stop
+    }
+    if not query_terms:
+        return 1.0
+    corpus = f"{article.get('title', '')} {article.get('abstract', '')}".lower()
+    matched = {term for term in query_terms if term in corpus}
+    return len(matched) / len(query_terms)
+
+
 def search_academic_articles(
     query: str, limit: int = 4, timeout: int = 20, *, from_publication_date: str = "",
+    diagnostics: dict[str, Any] | None = None, attempts_per_provider: int = 2,
 ) -> list[dict[str, Any]]:
-    """Search scholarly metadata and abstracts without requiring another API key."""
-    options = {"search": query.strip(), "per-page": max(1, min(limit + 4, 20)), "sort": "publication_date:desc"}
+    """Search OpenAlex with retry, then degrade to Crossref without another API key."""
+    report = diagnostics if diagnostics is not None else {}
+    report.update({"attempted": ["OpenAlex"], "provider": "", "errors": [], "degraded": False})
+    # Search relevance must lead. Freshness is already scored later by the
+    # garden ranker; sorting the provider by date first admits topical noise.
+    options = {"search": query.strip(), "per-page": max(1, min(limit + 4, 20)), "sort": "relevance_score:desc"}
     if from_publication_date:
         options["filter"] = f"from_publication_date:{from_publication_date}"
     params = urlencode(options)
@@ -170,13 +248,48 @@ def search_academic_articles(
         f"{OPENALEX_API}?{params}",
         headers={"User-Agent": "KnowledgeGarden/1.0 (local learning assistant)"},
     )
-    with urlopen(request, timeout=timeout) as response:
-        payload = json.load(response)
     articles = []
-    for work in payload.get("results") or []:
-        article = _article_from_work(work)
-        if article and article["url"]:
-            articles.append(article)
-        if len(articles) == limit:
-            break
-    return articles
+    try:
+        payload = _request_json_with_retry(request, timeout, attempts=attempts_per_provider)
+        for work in payload.get("results") or []:
+            article = _article_from_work(work)
+            if article and article["url"] and _query_term_coverage(query, article) >= 0.67:
+                articles.append(article)
+            if len(articles) == limit:
+                break
+        if articles:
+            report["provider"] = "OpenAlex"
+            return articles
+        report["errors"].append("OpenAlex 没有返回符合条件的记录")
+    except Exception as exc:
+        code = f" HTTP {exc.code}" if isinstance(exc, HTTPError) else ""
+        report["errors"].append(f"OpenAlex{code}：{exc.__class__.__name__}")
+
+    report["attempted"].append("Crossref")
+    report["degraded"] = True
+    crossref_options: dict[str, Any] = {
+        "query.bibliographic": query.strip(), "rows": max(1, min(limit + 4, 20)),
+        "sort": "relevance", "order": "desc",
+    }
+    if from_publication_date:
+        crossref_options["filter"] = f"from-pub-date:{from_publication_date},until-pub-date:{date.today().isoformat()}"
+    crossref_request = Request(
+        f"{CROSSREF_API}?{urlencode(crossref_options)}",
+        headers={"User-Agent": "KnowledgeGarden/1.0 (mailto:knowledge-garden@localhost)"},
+    )
+    try:
+        payload = _request_json_with_retry(crossref_request, timeout, attempts=attempts_per_provider)
+        for item in (payload.get("message") or {}).get("items") or []:
+            article = _article_from_crossref(item)
+            if article and _query_term_coverage(query, article) >= 0.67:
+                articles.append(article)
+            if len(articles) == limit:
+                break
+        if articles:
+            report["provider"] = "Crossref"
+            return articles
+        report["errors"].append("Crossref 没有返回符合条件的记录")
+    except Exception as exc:
+        code = f" HTTP {exc.code}" if isinstance(exc, HTTPError) else ""
+        report["errors"].append(f"Crossref{code}：{exc.__class__.__name__}")
+    raise RuntimeError("；".join(report["errors"]) or "在线学术检索没有返回结果")

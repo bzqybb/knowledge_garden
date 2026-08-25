@@ -20,6 +20,10 @@ TRACEMEMO_TOKEN_PATH = RUNTIME_DIR / "tracememo-api-token.dpapi"
 DEFAULT_BASE_URL = "http://127.0.0.1:6131"
 MAX_MESSAGES = 300
 MAX_CONTENT_CHARS = 10_000
+OPAQUE_CONTACT_NAME = re.compile(
+    r"^(?:gh_[a-z0-9]+(?:@app)?|wxid_[a-z0-9_]+|[a-f0-9]{24,64})$",
+    re.IGNORECASE,
+)
 
 
 class TraceMemoError(RuntimeError):
@@ -141,15 +145,21 @@ class TraceMemoClient:
     def official_accounts(self, filter_text: str = "") -> dict[str, Any]:
         payload = self.contacts(filter_text)
         contacts = payload.get("contacts") if isinstance(payload.get("contacts"), list) else []
-        official = [
-            item for item in contacts
-            if isinstance(item, dict) and (
+        official = []
+        unresolved_count = 0
+        for item in contacts:
+            if not isinstance(item, dict) or not (
                 bool(item.get("isOfficialAccount"))
                 or str(item.get("m_nsUsrName", "")).startswith("gh_")
-            )
-        ]
-        official.sort(key=lambda item: str(item.get("m_nsNickName") or item.get("remark") or ""))
-        return {"count": len(official), "items": official}
+            ):
+                continue
+            normalized = normalize_contact(item)
+            if not normalized["display_name"]:
+                unresolved_count += 1
+                continue
+            official.append(normalized)
+        official.sort(key=lambda item: str(item.get("display_name") or ""))
+        return {"count": len(official), "items": official, "unresolved_count": unresolved_count}
 
     def resolve(self, query: str) -> dict[str, Any]:
         if not query.strip():
@@ -175,8 +185,16 @@ class TraceMemoClient:
         data["truncated"] = len(raw_messages) > MAX_MESSAGES
         return data
 
-    def official_articles(self, talker: str, *, days: int = 30) -> dict[str, Any]:
+    def official_articles(
+        self,
+        talker: str,
+        *,
+        days: int = 30,
+        contact: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         days = max(1, min(int(days), 365))
+        account = normalize_contact(contact or {})
+        account_name = account["display_name"] or _human_contact_name(talker)
         # Reader Skill requires checking TraceMemo's own clock before resolving
         # relative windows. TraceMemo and the Garden share the same local host.
         clock = self.current_time()
@@ -190,9 +208,18 @@ class TraceMemoClient:
             item for item in result.get("messages", [])
             if isinstance(item.get("article"), dict) and item["article"].get("url")
         ]
+        for item in articles:
+            article = item["article"]
+            publisher = _human_contact_name(article.get("publisher", ""))
+            sender = _human_contact_name(item.get("sender", ""))
+            article["account_name"] = account_name
+            article["publisher"] = publisher or account_name
+            item["sender"] = sender or article["publisher"] or account_name
+            item["account_name"] = account_name
         articles.sort(key=lambda item: item.get("sent_at_sort", 0), reverse=True)
         return {
             "talker": talker,
+            "account_name": account_name,
             "days": days,
             "clock": clock,
             "count": len(articles),
@@ -207,6 +234,30 @@ def _first(mapping: dict[str, Any], names: tuple[str, ...], default: Any = "") -
         if value not in (None, ""):
             return value
     return default
+
+
+def _human_contact_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or OPAQUE_CONTACT_NAME.fullmatch(text):
+        return ""
+    if text.casefold() in {"user", "system", "unknown", "null", "none"}:
+        return ""
+    return text
+
+
+def normalize_contact(value: Any) -> dict[str, Any]:
+    item = dict(value) if isinstance(value, dict) else {}
+    display_name = ""
+    for key in (
+        "m_nsNickName", "display_name", "displayName", "wechatNickname",
+        "nickname", "name", "remark", "account_name", "talker",
+    ):
+        display_name = _human_contact_name(item.get(key, ""))
+        if display_name:
+            break
+    item["display_name"] = display_name
+    item["account_id"] = str(_first(item, ("m_nsUsrName", "username", "wxid", "md5"))).strip()
+    return item
 
 
 def _clock_datetime(clock: dict[str, Any]) -> datetime:

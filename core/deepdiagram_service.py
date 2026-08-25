@@ -56,7 +56,9 @@ def full_service_available(timeout: float = 1.2) -> bool:
 
 
 def _clean_label(text: Any) -> tuple[str, list[str]]:
-    value = re.sub(r"<[^>]+>", "", unescape(str(text or "")))
+    value = unescape(str(text or ""))
+    value = re.sub(r"<br\s*/?>", " · ", value, flags=re.I)
+    value = re.sub(r"<[^>]+>", "", value)
     evidence = re.findall(r"\[((?:M|L|W|A|T)\d+)\]", value)
     value = re.sub(r"\[((?:M|L|W|A|T)\d+)\]", "", value)
     return re.sub(r"\s+", " ", value).strip(" `#*-\t"), evidence
@@ -111,21 +113,148 @@ def _parse_flow_json(code: str) -> tuple[list[dict[str, Any]], list[dict[str, st
 def _parse_mermaid(code: str) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     labels: dict[str, tuple[str, list[str]]] = {}
     edges: list[dict[str, str]] = []
-    token = r"([A-Za-z][A-Za-z0-9_-]*)(?:\s*[\[({]+\s*[\"']?([^\]\)}\"']+)[\"']?\s*[\])}]+)?"
-    edge_re = re.compile(token + r"\s*(?:-->|---|==>|-.->)(?:\|([^|]+)\|)?\s*" + token)
+    # DeepDiagram usually declares nodes on their own lines and connects them
+    # later (e.g. `A["label"]` followed by `ROOT --> A`).  The old parser only
+    # understood inline declarations on edge lines, reducing real diagrams to
+    # opaque IDs such as A/B/CQ.  Capture standalone declarations first.
+    quoted_node_re = re.compile(
+        r"([A-Za-z][A-Za-z0-9_-]*)\s*(?:\[\[|\[\(|\[|\(\(|\(|\{\{|\{)\s*"
+        r"[\"'](.*?)[\"']\s*(?:\]\]|\]\)|\]|\)\)|\)|\}\}|\})"
+    )
+    node_re = re.compile(
+        r"^\s*([A-Za-z][A-Za-z0-9_-]*)\s*"
+        r"(?:\[\[|\[\(|\[|\(\(|\(|\{\{|\{)\s*"
+        r"(.*?)\s*"
+        r"(?:\]\]|\]\)|\]|\)\)|\)|\}\}|\})\s*$"
+    )
     for raw in code.splitlines():
-        match = edge_re.search(raw)
+        line = raw.strip()
+        if not line or line.startswith(("flowchart ", "graph ", "subgraph ", "class", "style ", "end", "</")):
+            continue
+        quoted = list(quoted_node_re.finditer(raw))
+        for match in quoted:
+            node_id, node_label = match.groups()
+            labels[node_id] = _clean_label(node_label)
+        if not quoted:
+            match = node_re.match(raw)
+            if match:
+                node_id, node_label = match.groups()
+                labels[node_id] = _clean_label(node_label.strip(" \"'"))
+
+    edge_re = re.compile(
+        r"\b([A-Za-z][A-Za-z0-9_-]*)\b\s*"
+        r"(?:-->|---|==>|-\.->)(?:\|([^|]+)\|)?\s*"
+        r"\b([A-Za-z][A-Za-z0-9_-]*)\b"
+    )
+    for raw in code.splitlines():
+        # Replace inline node declarations with their IDs before reading the
+        # relation. This preserves nested evidence markers such as [W1] inside
+        # quoted labels instead of mistaking their closing bracket for a shape.
+        relation_line = quoted_node_re.sub(lambda match: match.group(1), raw)
+        relation_line = re.sub(
+            r"([A-Za-z][A-Za-z0-9_-]*)\s*\[([^\[\]]+)\]",
+            lambda match: match.group(1), relation_line,
+        )
+        match = edge_re.search(relation_line)
         if not match:
             continue
-        source, source_label, edge_label, target, target_label = match.groups()
-        labels.setdefault(source, _clean_label(source_label or source))
-        labels.setdefault(target, _clean_label(target_label or target))
+        source, edge_label, target = match.groups()
+        labels.setdefault(source, _clean_label(source))
+        labels.setdefault(target, _clean_label(target))
         edges.append({"source": source, "target": target, "label": _clean_label(edge_label)[0]})
     nodes = [
         {"id": node_id, "label": value[0], "role": "concept", "evidence_ids": value[1]}
         for node_id, value in labels.items() if value[0]
     ]
     return nodes, edges
+
+
+def _structure_comparison_graph(
+    nodes: list[dict[str, Any]], edges: list[dict[str, str]], blueprint: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Add explicit comparison anchors to a full-service Mermaid result.
+
+    Mermaid subgraph headings are visual containers rather than graph nodes, so
+    they disappear when converted into Knowledge Garden's safe SVG format.  We
+    reconstruct the two audited subjects and bind evidence-bearing claims to
+    the matching subject without asking another model or adding facts.
+    """
+    subjects = [str(item).strip() for item in blueprint.get("comparison_subjects", []) if str(item).strip()][:2]
+    if len(subjects) < 2:
+        return nodes, edges
+
+    normalized_question = re.sub(r"\s+", "", str(blueprint.get("core_question") or "")).lower()
+    subject_normalized = [re.sub(r"\s+", "", item).lower() for item in subjects]
+    filtered: list[dict[str, Any]] = []
+    for item in nodes:
+        label = str(item.get("label") or "").strip()
+        normalized = re.sub(r"\s+", "", label).lower()
+        is_unbound_comparison_heading = (
+            not item.get("evidence_ids")
+            and normalized not in subject_normalized
+            and all(subject in normalized for subject in subject_normalized)
+        )
+        if "corequestion" in normalized or (normalized_question and normalized == normalized_question) or is_unbound_comparison_heading:
+            continue
+        item = dict(item)
+        item["role"] = "boundary" if re.match(r"^(?:gap|boundary|边界|缺口)\s*[:：]", label, re.I) else "comparison_dimension"
+        filtered.append(item)
+
+    existing_ids = {str(item.get("id")) for item in filtered}
+    subject_nodes: list[dict[str, Any]] = []
+    for index, subject in enumerate(subjects, 1):
+        existing = next((
+            item for item in filtered
+            if re.sub(r"\s+", "", str(item.get("label") or "")).lower() == subject_normalized[index - 1]
+        ), None)
+        if existing:
+            filtered.remove(existing)
+            existing = dict(existing)
+            existing["role"] = "anchor"
+            subject_nodes.append(existing)
+        else:
+            node_id = f"comparison_subject_{index}"
+            while node_id in existing_ids:
+                node_id += "_"
+            existing_ids.add(node_id)
+            subject_nodes.append({"id": node_id, "label": subject, "role": "anchor", "evidence_ids": []})
+
+    evidence_subjects: dict[str, set[int]] = {}
+    for item in blueprint.get("evidence_items", []):
+        if not isinstance(item, dict):
+            continue
+        source_id = str(item.get("source_id") or "")
+        excerpt = re.sub(r"\s+", "", str(item.get("excerpt") or "")).lower()
+        for index, subject in enumerate(subjects):
+            if re.sub(r"\s+", "", subject).lower() in excerpt:
+                evidence_subjects.setdefault(source_id, set()).add(index)
+
+    clean_ids = {str(item.get("id")) for item in filtered}
+    clean_edges = [
+        dict(item) for item in edges
+        if str(item.get("source")) in clean_ids and str(item.get("target")) in clean_ids
+    ]
+    for item in filtered:
+        if item.get("role") != "comparison_dimension":
+            continue
+        matched: set[int] = set()
+        for source_id in item.get("evidence_ids", []):
+            matched.update(evidence_subjects.get(str(source_id), set()))
+        targets = sorted(matched) if matched else list(range(len(subject_nodes)))
+        for index in targets:
+            source_id, target_id = subject_nodes[index]["id"], str(item.get("id"))
+            existing_edge = next((
+                edge for edge in clean_edges
+                if str(edge.get("source")) == source_id and str(edge.get("target")) == target_id
+            ), None)
+            if existing_edge:
+                existing_edge["label"] = "比较维度"
+            else:
+                clean_edges.append({"source": source_id, "target": target_id, "label": "比较维度"})
+            subject_nodes[index]["evidence_ids"] = sorted(set(
+                subject_nodes[index]["evidence_ids"] + [str(value) for value in item.get("evidence_ids", [])]
+            ))
+    return subject_nodes + filtered, clean_edges
 
 
 def _parse_drawio(code: str) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
@@ -162,8 +291,9 @@ def _parse_code(code: str, agent: str, kind: str) -> tuple[list[dict[str, Any]],
 
 def generate_with_full_service(
     *, user_request: str, kind: str, blueprint: dict[str, Any],
-    allowed_source_ids: set[str], timeout: float = 14,
+    allowed_source_ids: set[str], timeout: float | None = None,
 ) -> dict[str, Any]:
+    timeout = timeout or float(os.getenv("DEEPDIAGRAM_TIMEOUT_SECONDS", "45"))
     root = _service_root()
     _validate_service_url(root)
     if not full_service_available():
@@ -217,6 +347,8 @@ def generate_with_full_service(
         nodes, edges = _parse_code(code, selected_agent, kind)
     except Exception as exc:
         raise DeepDiagramServiceError("完整 DeepDiagram 产物无法安全解析") from exc
+    if kind == "comparison":
+        nodes, edges = _structure_comparison_graph(nodes, edges, blueprint)
     return validate_diagram(
         {
             "title": str(blueprint.get("research_object") or blueprint.get("core_question") or "知识图解"),

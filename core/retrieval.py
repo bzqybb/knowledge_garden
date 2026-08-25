@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from core.llm import LLMError, chat_json
+from core.query_understanding import build_query_plan, normalize_query
 from core.storage import GardenStore
 from core.learning_memory import note_activation
 
@@ -26,6 +27,18 @@ QUESTION_FRAMES = re.compile(
 PLACEHOLDER_MARKERS = (
     "等待后续资料继续充实", "由 ingest 自动建立", "由Ingest自动建立", "待后续资料", "仅占位",
 )
+
+
+def _is_foundational_plan(plan: dict[str, Any]) -> bool:
+    return str(plan.get("subject_mode") or "").strip().lower() == "foundational"
+
+
+def _target_kind_weight(kind: str, source_type: str) -> float:
+    if source_type in {"textbook", "course"}:
+        return 1.25
+    if kind in {"concept", "moc", "bridge", "knowledge", "knowledge_point"}:
+        return 1.12
+    return 1.0
 
 
 def _meaningful_phrases(text: str) -> list[str]:
@@ -111,6 +124,21 @@ def _snippet(text: str, terms: list[str], width: int = 280) -> str:
     return ("…" if start else "") + snippet + ("…" if start + width < len(clean) else "")
 
 
+def _fallback_queries(plan: dict[str, Any], query: str) -> list[str]:
+    fallback: list[str] = []
+    concepts = plan.get("concepts", [])
+    aliases = plan.get("aliases", [])
+    if aliases:
+        candidate = normalize_query(f"{query} {aliases[0]}")
+        if candidate:
+            fallback.append(candidate)
+    for value in concepts[:1]:
+        normalized = normalize_query(str(value))
+        if normalized and normalized not in fallback and normalized != normalize_query(query):
+            fallback.append(normalized)
+    return list(dict.fromkeys(fallback))[:1]
+
+
 def _search_notes_lexical(
     store: GardenStore, query: str, *, kinds: set[str] | None = None, limit: int = 5,
     strict_relevance: bool = True,
@@ -155,49 +183,166 @@ def _search_notes_lexical(
 
 def search_notes(
     store: GardenStore, query: str, *, kinds: set[str] | None = None, limit: int = 5,
-    strict_relevance: bool = True,
+    strict_relevance: bool = True, query_plan: dict[str, Any] | None = None,
+    max_queries: int = 3,
+    semantic_enabled: bool | None = None,
+    rerank_enabled: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """Fuse exact lexical hits with optional local semantic FAISS hits."""
+    """Run structured multi-query lexical/vector retrieval, then rerank."""
     candidate_limit = max(20, limit * 4)
-    lexical = _search_notes_lexical(
-        store, query, kinds=kinds, limit=candidate_limit, strict_relevance=strict_relevance,
-    )
+    plan = query_plan or build_query_plan(query)
+    queries = list(plan.get("queries") or [{"text": query, "source": "original", "weight": 1.0}])
+    strategy = str(plan.get("strategy") or "")
+    strategy_limit = {
+        "single_query": 1,
+        "resolved_followup": 1,
+        "decompose": 1,
+        "semantic_rewrite": 2,
+        "bilingual_expand": 2,
+    }
+    query_budget = min(max_queries, strategy_limit.get(strategy, max(1, max_queries)))
+    foundational = _is_foundational_plan(plan)
+    if foundational and query_budget < 2:
+        query_budget = min(2, max(1, max_queries))
+    queries = queries[:query_budget]
     notes = store.list_notes(limit=10_000)
-    semantic: list[dict[str, Any]] = []
-    if os.getenv("GARDEN_DISABLE_SEMANTIC", "").strip().lower() not in {"1", "true", "yes"}:
-        try:
-            from core.semantic_index import semantic_search
-            semantic = semantic_search(query, limit=candidate_limit, kinds=kinds, store_notes=notes)
-        except Exception:
-            semantic = []
-
     note_by_path = {str(note["path"]): note for note in notes if not kinds or note["kind"] in kinds}
     fused: dict[str, dict[str, Any]] = {}
-    for rank, item in enumerate(lexical, 1):
-        path = str(item["path"])
-        fused[path] = {**item, "lexical_rank": rank, "fusion_score": 1.0 / (60 + rank)}
-    for rank, hit in enumerate(semantic, 1):
-        path = str(hit["path"])
-        note = note_by_path.get(path)
-        if note is None:
+    if semantic_enabled is None:
+        semantic_enabled = os.getenv("GARDEN_DISABLE_SEMANTIC", "").strip().lower() not in {"1", "true", "yes"}
+    for query_index, variant in enumerate(queries):
+        variant_text = str(variant.get("text") or "").strip()
+        source = str(variant.get("source") or "rewrite")
+        weight = max(0.1, min(1.0, float(variant.get("weight", 1.0))))
+        if not variant_text:
             continue
-        item = fused.get(path)
-        if item is None:
-            item = {key: value for key, value in note.items() if key != "content"}
-            item.update({
-                "snippet": hit["text"], "score": 0.0, "knowledge_value": note_activation(note),
-                "relevance_score": hit["semantic_score"], "matched_terms": ["语义向量匹配"],
-                "relevance_reason": "多语言或同义语义匹配", "knowledge_status": local_knowledge_status(note),
-                "fusion_score": 0.0,
-            })
-            fused[path] = item
-        item["semantic_rank"] = rank
-        item["semantic_score"] = hit["semantic_score"]
-        item["semantic_snippet"] = hit["text"]
-        item["fusion_score"] += 1.15 / (60 + rank)
-        item["snippet"] = hit["text"]
+        lexical = _search_notes_lexical(
+            store, variant_text, kinds=kinds, limit=candidate_limit,
+            strict_relevance=strict_relevance if query_index == 0 else False,
+        )
+        for rank, hit in enumerate(lexical, 1):
+            path = str(hit["path"])
+            item = fused.setdefault(path, {**hit, "fusion_score": 0.0, "query_matches": []})
+            item_kind = str(item.get("kind") or "")
+            item_source = str(item.get("source") or "")
+            kind_weight = _target_kind_weight(item_kind, item_source) if foundational else 1.0
+            item["fusion_score"] += weight * kind_weight / (60 + rank)
+            item["query_matches"].append({"source": source, "channel": "lexical", "rank": rank})
+            if "lexical_rank" not in item or rank < item["lexical_rank"]:
+                item["lexical_rank"] = rank
+        semantic: list[dict[str, Any]] = []
+        if semantic_enabled:
+            try:
+                from core.semantic_index import semantic_search
+
+                semantic = semantic_search(
+                    variant_text, limit=candidate_limit, kinds=kinds, store_notes=notes,
+                )
+            except Exception:
+                semantic = []
+        for rank, hit in enumerate(semantic, 1):
+            path = str(hit["path"])
+            note = note_by_path.get(path)
+            if note is None:
+                continue
+            item = fused.get(path)
+            if item is None:
+                item = {key: value for key, value in note.items() if key != "content"}
+                note_kind = str(note.get("kind") or "")
+                item.update({
+                    "snippet": hit["text"], "score": 0.0, "knowledge_value": note_activation(note),
+                    "relevance_score": hit["semantic_score"], "matched_terms": ["语义向量匹配"],
+                    "relevance_reason": "多语言或同义语义匹配", "knowledge_status": local_knowledge_status(note),
+                    "fusion_score": 0.0, "query_matches": [],
+                })
+                fused[path] = item
+                item_kind = note_kind
+            else:
+                item_kind = str(item.get("kind") or note.get("kind") or "")
+            source_type = str(note.get("source") or "")
+            if foundational:
+                kind_weight = _target_kind_weight(item_kind, source_type)
+            else:
+                kind_weight = 1.0
+            item["fusion_score"] += 1.15 * weight * kind_weight / (60 + rank)
+            item["query_matches"].append({"source": source, "channel": "semantic", "rank": rank})
+            old_score = float(item.get("semantic_score", -1.0))
+            if hit["semantic_score"] > old_score:
+                item["semantic_rank"] = rank
+                item["semantic_score"] = hit["semantic_score"]
+                item["semantic_snippet"] = hit["text"]
+                item["snippet"] = hit["text"]
+
+    if not fused and strategy in {"single_query", "resolved_followup"}:
+        for fallback_text in _fallback_queries(plan, query):
+            fallback_clean = normalize_query(fallback_text)
+            if not fallback_clean:
+                continue
+            lexical = _search_notes_lexical(
+                store, fallback_clean, kinds=kinds, limit=candidate_limit,
+                strict_relevance=False,
+            )
+            for rank, hit in enumerate(lexical, 1):
+                path = str(hit["path"])
+                item = fused.setdefault(path, {**hit, "fusion_score": 0.0, "query_matches": []})
+                item["fusion_score"] += 0.85 / (80 + rank)
+                item["query_matches"].append({
+                    "source": "fallback", "channel": "lexical", "rank": rank,
+                })
+                if "lexical_rank" not in item or rank < item["lexical_rank"]:
+                    item["lexical_rank"] = rank
+            if semantic_enabled:
+                try:
+                    from core.semantic_index import semantic_search
+
+                    semantic = semantic_search(fallback_clean, limit=candidate_limit, kinds=kinds, store_notes=notes)
+                except Exception:
+                    semantic = []
+            else:
+                semantic = []
+            for rank, hit in enumerate(semantic, 1):
+                path = str(hit["path"])
+                note = note_by_path.get(path)
+                if note is None:
+                    continue
+                item = fused.get(path)
+                if item is None:
+                    item = {key: value for key, value in note.items() if key != "content"}
+                    item.update({
+                        "snippet": hit["text"], "score": 0.0, "knowledge_value": note_activation(note),
+                        "relevance_score": hit["semantic_score"], "matched_terms": ["语义向量匹配"],
+                        "relevance_reason": "多语言或同义语义匹配", "knowledge_status": local_knowledge_status(note),
+                        "fusion_score": 0.0, "query_matches": [],
+                    })
+                    fused[path] = item
+                note_kind = str(note.get("kind") or "")
+                source_type = str(note.get("source") or "")
+                kind_weight = _target_kind_weight(note_kind, source_type) if foundational else 1.0
+                item["fusion_score"] += 1.0 * kind_weight / (80 + rank)
+                item["query_matches"].append({"source": "fallback", "channel": "semantic", "rank": rank})
+                old_score = float(item.get("semantic_score", -1.0))
+                if hit["semantic_score"] > old_score:
+                    item["semantic_rank"] = rank
+                    item["semantic_score"] = hit["semantic_score"]
+                    item["semantic_snippet"] = hit["text"]
+                    item["snippet"] = hit["text"]
 
     ranked = sorted(fused.values(), key=lambda item: item["fusion_score"], reverse=True)
+    if rerank_enabled is None:
+        rerank_enabled = os.getenv("GARDEN_DISABLE_RERANKER", "").strip().lower() not in {"1", "true", "yes"}
+    if rerank_enabled:
+        try:
+            from core.reranker import rerank_candidates
+
+            configured = int(os.getenv("GARDEN_RERANK_CANDIDATES", "16"))
+            rerank_limit = min(len(ranked), max(limit, max(4, configured)))
+            ranked = rerank_candidates(str(plan.get("resolved") or query), ranked[:rerank_limit]) + ranked[rerank_limit:]
+        except Exception:
+            # Reranking is an optional precision layer. Retrieval remains
+            # available on machines where its local model is not installed.
+            pass
+    for item in ranked[:limit]:
+        item["query_plan"] = plan
     return ranked[:limit]
 
 
@@ -379,8 +524,13 @@ GENERIC_DISCIPLINE_HINTS = [
         "signals": ["电路", "电压", "电流", "阻抗", "circuit", "voltage", "current", "kirchhoff"],
         "discipline": "电气与电子工程", "branch": "电路与系统",
         "topics": [
-            ("基础电路分析", ["欧姆定律", "基尔霍夫", "ohm", "kirchhoff"]),
-            ("交流电路", ["交流", "相量", "阻抗", "phasor", "impedance"]),
+            ("基础概念与电阻电路", ["basic concepts", "resistive circuits", "ohm", "kirchhoff", "series", "parallel"]),
+            ("节点、回路与网络定理", ["nodal", "loop analysis", "node-voltage", "mesh", "superposition", "thevenin", "norton"]),
+            ("运算放大器", ["operational amplifiers", "inverting", "noninverting", "op amp"]),
+            ("电容、电感与暂态", ["capacitance", "inductance", "transient", "first-order", "second-order"]),
+            ("交流稳态与功率", ["ac steady-state", "phasor", "impedance", "power analysis", "power factor"]),
+            ("耦合网络与多相电路", ["mutual inductance", "transformer", "polyphase", "three-phase", "coupled networks"]),
+            ("频率响应与变换分析", ["variable-frequency", "frequency response", "laplace", "fourier", "two-port"]),
         ],
     },
     {
@@ -426,10 +576,18 @@ def _evidence_terms(raw: Any, content: str) -> list[str]:
     return [item for item in terms if item.lower() in lowered][:5]
 
 
+def _pdf_page_number(note: dict[str, Any]) -> int:
+    match = re.search(r"#page=(\d+)$", str(note.get("path") or ""))
+    return int(match.group(1)) if match else 1_000_000_000
+
+
 def classify_textbook_structure(title: str, content: str) -> dict[str, Any]:
     """Build a reusable curriculum tree from one textbook's actual content."""
     result = None
+    taxonomy_model_disabled = os.getenv("GARDEN_DISABLE_TAXONOMY_MODEL", "").strip().lower() in {"1", "true", "yes"}
     try:
+        if taxonomy_model_disabled:
+            raise LLMError("教材结构模型已显式关闭")
         result = chat_json(
             "你是教材知识结构分析专家。目标不是复刻目录，而是回答‘这本教材实际教了什么’，并从粗到细生成 学科→分支→学习方向→知识点 四层知识树。先判断学科，再识别具有独立核心问题和方法的分支，再把跨章节主题组织为学习方向，最后抽取正文明确讲授的概念、定理、方法或模型。学科通常对应独立院系与研究对象；分支是学科内的主要子领域；学习方向有清晰知识边界；知识点是一个可独立讲授和复习的单元。父节点必须比子节点更宽泛，子节点必须确实展开父节点；同层节点应尽量互斥，若‘微分方程’与‘偏微分方程’同层，应把前者收窄为‘常微分方程’。目录、篇章标题可用于定位候选，但不能单独证明教材真正讲授了该节点，必须同时有正文中的定义、首段论述、反复术语或总结句作为证据。每个节点至少提供3个能在给定正文中逐字找到的 evidence_terms；不足3个就让该层为空，禁止凑数。节点名必须是知识性名词短语，不能是教材名、章节号、页码、练习题、案例名、问题或完整句子。导论教材偏向覆盖广度，高级教材或专著偏向精确深度。最多2个学科、每学科3个分支、每分支6个方向、每方向8个知识点；教材没讲的不推测。",
             f"教材：{title}\n目录与代表页：\n{content[:18000]}\n\n"
@@ -578,7 +736,9 @@ def rebuild_domain_map(store: GardenStore, *, force_model: bool = False) -> int:
     cache = store.setting("textbook_taxonomy_cache_v2", {}) or {}
     next_cache: dict[str, Any] = {}
     for book_key, pages_for_book in books.items():
-        pages_for_book.sort(key=lambda item: item["path"])
+        # Sorting raw paths puts page 100 before page 11 and caused the table
+        # of contents to be skipped. Taxonomy sampling must follow PDF order.
+        pages_for_book.sort(key=_pdf_page_number)
         book_title = pages_for_book[0]["title"].split(" · 第", 1)[0]
         # Early pages usually contain the table of contents; a few evenly
         # spaced pages add evidence for later chapters without sending a book.

@@ -12,8 +12,9 @@ def search_wikipedia(query: str, limit: int = 3, timeout: int = 15) -> list[dict
     """Use Wikipedia as a terminology and orientation source, never as sole proof."""
     params = urlencode({
         "action": "query", "generator": "search", "gsrsearch": query.strip(),
-        "gsrlimit": max(1, min(limit, 5)), "prop": "extracts|info",
-        "exintro": 1, "explaintext": 1, "inprop": "url", "format": "json", "utf8": 1,
+        "gsrlimit": max(1, min(limit, 5)), "prop": "extracts|info|langlinks",
+        "exintro": 1, "explaintext": 1, "inprop": "url",
+        "lllang": "en", "lllimit": 1, "format": "json", "utf8": 1,
     })
     request = Request(
         f"{WIKIPEDIA_API}?{params}",
@@ -30,6 +31,7 @@ def search_wikipedia(query: str, limit: int = 3, timeout: int = 15) -> list[dict
             "abstract": str(page.get("extract") or "")[:2200],
             "year": None, "authors": [], "venue": "Wikipedia",
             "source": "Wikipedia", "source_type": "encyclopedia",
+            "english_title": str(next(iter(page.get("langlinks") or []), {}).get("*") or ""),
         }
         for page in pages if page.get("title") and page.get("extract")
     ]
