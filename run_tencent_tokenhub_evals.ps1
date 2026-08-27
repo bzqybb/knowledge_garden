@@ -1,6 +1,6 @@
 param(
     [int]$Limit = 5,
-    [string]$Model = "kimi-k2.6",
+    [string]$Model = "deepseek-v4-flash-0731",
     [string]$Dataset = "",
     [string]$InputReport = "",
     [switch]$CheckJudge,

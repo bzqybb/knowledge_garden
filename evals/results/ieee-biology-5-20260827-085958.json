@@ -1,0 +1,595 @@
+{
+  "suite": "ieee_xplore_biology_guided_reading",
+  "requested": 5,
+  "completed": 5,
+  "fulltext": 0,
+  "abstract_only": 5,
+  "generated_at": "2026-08-27T08:59:58+08:00",
+  "elapsed_seconds": 263.83,
+  "items": [
+    {
+      "rank": 1,
+      "field": "脑科学 × fMRI解码",
+      "doi": "10.1109/JBHI.2026.3708743",
+      "doi_url": "https://doi.org/10.1109/JBHI.2026.3708743",
+      "xplore_url": "https://ieeexplore.ieee.org/document/11592338",
+      "title": "Cross-subject fMRI-to-Image with Visual-cortex 2D Representation and Pre-Training",
+      "venue": "IEEE Journal of Biomedical and Health Informatics",
+      "publication_date": "2026-01-01",
+      "open_access": false,
+      "oa_status": "closed",
+      "repository_url": "",
+      "result": {
+        "title": "Cross-subject fMRI-to-Image with Visual-cortex 2D Representation and Pre-Training",
+        "url": "https://ieeexplore.ieee.org/document/11592338",
+        "pdf_url": "",
+        "scope": "abstract",
+        "scope_label": "摘要级深读",
+        "source_note": "本次仅依据摘要深读，无法验证完整方法、实验细节和作者全部局限说明。",
+        "fulltext_error": "",
+        "extracted_chars": 1060,
+        "analysis": {
+          "problem": "从fMRI数据解码大脑活动对于神经科学至关重要，但传统方法主要集中于分析单个受试者的数据，缺乏跨受试者的零样本图像重建能力。",
+          "novelty": "提出X-MinD，一种零样本跨受试者fMRI到图像的方法，通过将fMRI视觉皮层信号转换为2D表面图像，并利用自监督预训练的可视化自编码器学习可泛化的皮层特征，实现无需微调的跨受试者解码。",
+          "method": "将fMRI视觉皮层信号转换为2D表面图像作为表征，缓解个体差异；使用自定义可视化自编码器进行自监督预训练，学习可泛化的视觉皮层fMRI特征；通过fMRI特征与图像特征空间之间的简单线性映射，实现零样本跨受试者图像重建。",
+          "concepts": [
+            "fMRI",
+            "cross-subject decoding",
+            "zero-shot learning",
+            "visual cortex",
+            "2D surface representation",
+            "self-supervised pre-training",
+            "autoencoder",
+            "linear mapping"
+          ],
+          "findings": [
+            {
+              "claim": "提出X-MinD方法，实现零样本跨受试者fMRI到图像重建。",
+              "evidence": "we present X-MinD, a novel zero-shot cross-subject fMRI-to image approach designed to reconstruct images from brain activity across unseen subjects.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "将fMRI视觉皮层信号转换为2D表面图像，提供从结构化视觉纹理学习表征的新视角。",
+              "evidence": "By converting fMRI visual cortex signals into 2D surface images, we offer a fresh perspective on learning representations of brain activity from structured visual textures instead of flattened response signals.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "2D表面表征有助于缓解个体间差异。",
+              "evidence": "Utilizing such an fMRI representation mitigates differences across multiple individuals.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "通过自监督预训练的可视化自编码器学习可泛化的视觉皮层fMRI特征。",
+              "evidence": "it enables the development of a customized visual autoencoder for learning generalizable visual-cortex fMRI features through self-supervised pre-training.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "通过fMRI特征与图像特征空间之间的线性映射，无需微调即可实现零样本跨受试者解码。",
+              "evidence": "With a straightforward linear mapping between fMRI features and image feature space, our framework achieves effective zero-shot decoding of cross-subject fMRI activity into realistic and semantically consistent images, bypassing the need for model fine tuning.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "实验表明该框架在零样本跨受试者脑解码中性能优越。",
+              "evidence": "We conduct extensive experiments to establish the superior performance of our framework for zero-shot cross subject brain decoding.",
+              "grounded": true,
+              "validation": "exact_quote"
+            }
+          ],
+          "limitations": "摘要中未提及具体局限。由于仅基于摘要，无法判断模型在非视觉任务上的泛化性、对噪声fMRI的鲁棒性、计算成本、训练数据规模等。",
+          "prerequisites": "需要具备fMRI基本原理、图像重建基础、自监督学习概念、线性映射知识。",
+          "reading_routes": {
+            "ten_minutes": [
+              "阅读摘要并理解X-MinD的核心思想：将fMRI转换为2D表面图像以进行跨受试者重建。",
+              "明确方法的关键步骤：信号转换、自监督预训练、线性映射。",
+              "关注实验结论：零样本性能优越，无需微调。"
+            ],
+            "thirty_minutes": [
+              "深入理解fMRI视觉皮层信号的2D表面图像转换原理，参阅相关脑成像文献。",
+              "研究自定义可视化自编码器的架构和自监督预训练的具体方法。",
+              "分析线性映射如何将fMRI特征对齐到图像特征空间，以及零样本解码的机制。",
+              "查看论文中的实验设置、基线对比和评估指标，判断性能提升的显著性。",
+              "思考该方法的局限性和未来改进方向。"
+            ]
+          },
+          "questions": [
+            "2D表面图像转换是如何具体实现的？它如何保留皮层空间结构？",
+            "自监督预训练使用了哪些数据？预训练任务是什么？",
+            "线性映射是如何训练的？是否需要在源域使用配对数据？",
+            "零样本跨受试者解码的评估指标是什么？与单受试者方法相比性能如何？"
+          ],
+          "confidence": 0.4,
+          "local_connections": [],
+          "local_connection_note": "没有检索到足够相关的本地知识，因此没有强行关联教材。"
+        },
+        "reading_pipeline": {
+          "paper_reader": "论文正文/摘要 → 受证据约束的结构化论文卡",
+          "garden_connector": "论文卡 → 现有本地混合检索与记忆主链 → 经来源编号校验的个性化连接",
+          "local_candidate_count": 0,
+          "accepted_connection_count": 0
+        },
+        "generated_at": "2026-08-27T01:01:59+00:00",
+        "cached": false
+      },
+      "elapsed_seconds": 120.92
+    },
+    {
+      "rank": 2,
+      "field": "肿瘤病理 × 生物标志物",
+      "doi": "10.1109/JBHI.2026.3685529",
+      "doi_url": "https://doi.org/10.1109/JBHI.2026.3685529",
+      "xplore_url": "https://ieeexplore.ieee.org/document/11488043",
+      "title": "A tissue and cell-level annotated H&E and PD-L1 histopathology image dataset in non-small cell lung cancer",
+      "venue": "IEEE Journal of Biomedical and Health Informatics",
+      "publication_date": "2026-01-01",
+      "open_access": false,
+      "oa_status": "closed",
+      "repository_url": "",
+      "result": {
+        "title": "A tissue and cell-level annotated H&E and PD-L1 histopathology image dataset in non-small cell lung cancer",
+        "url": "https://ieeexplore.ieee.org/document/11488043",
+        "pdf_url": "",
+        "scope": "abstract",
+        "scope_label": "摘要级深读",
+        "source_note": "本次仅依据摘要深读，无法验证完整方法、实验细节和作者全部局限说明。",
+        "fulltext_error": "",
+        "extracted_chars": 1083,
+        "analysis": {
+          "problem": "非小细胞肺癌（NSCLC）组织病理图像中，肿瘤免疫微环境（TIME）具有预测免疫治疗反应的形态学和分子特征，但现有NSCLC数字病理数据集范围有限，缺少临床常见转移部位的注释，且未包含PD-L1免疫组化（IHC）等分子信息，难以支持细胞检测和组织分割等计算分析方法的开发与验证。",
+          "novelty": "据作者所知，这是第一个公开的、包含转移灶H&E手工注释和PD-L1 IHC注释的NSCLC数据集。该数据集是多染色、多中心、多扫描仪的，包含三种互补任务：H&E组织区域多类语义分割、IHC细胞核检测、PD-L1阳性肿瘤细胞检测。",
+          "method": "作者构建了“IGNITE data toolkit”，公开了来自155名患者的887个完全注释的兴趣区域（ROI）。数据集覆盖三个任务：(i) H&E染色切片的组织区域多类语义分割，包含16个类别，涵盖原发性和转移性NSCLC；(ii) IHC细胞核检测；(iii) PD-L1 IHC切片中PD-L1阳性肿瘤细胞检测。",
+          "concepts": [
+            "tumor immune microenvironment (TIME)",
+            "PD-L1 immunohistochemistry (IHC)",
+            "multi-class semantic segmentation",
+            "nuclei detection",
+            "H&E-stained slides",
+            "non-small cell lung cancer (NSCLC)",
+            "digital pathology",
+            "region of interest (ROI)"
+          ],
+          "findings": [
+            {
+              "claim": "该数据集包含来自155名患者的887个完全注释的兴趣区域。",
+              "evidence": "We publicly release 887 fully annotated regions of interest from 155 patients across three complementary tasks",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "数据集支持三个互补任务：组织区域分割、IHC细胞核检测、PD-L1阳性肿瘤细胞检测。",
+              "evidence": "across three complementary tasks: (i) multi-class semantic segmentation of tissue compartments in H&E-stained slides, with 16 classes spanning primary and metastatic NSCLC, (ii) IHC nuclei detection, and (iii) PD-L1 positive tumor cell detection in PD-L1 IHC slides",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "H&E分割任务包含16个类别，覆盖原发性和转移性NSCLC。",
+              "evidence": "multi-class semantic segmentation of tissue compartments in H&E-stained slides, with 16 classes spanning primary and metastatic NSCLC",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "该数据集据作者所知是第一个包含转移灶H&E手工注释和PD-L1 IHC的公开NSCLC数据集。",
+              "evidence": "To the best of our knowledge, this is the first public NSCLC dataset with manual annotations of H&E in metastatic sites and PD-L1 IHC",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "数据集是多染色、多中心、多扫描仪的。",
+              "evidence": "To fill this gap, we introduce the ‘IGNITE data toolkit’, a multi-stain, multi-centric, and multi-scanner dataset of annotated NSCLC digital pathology images.",
+              "grounded": true,
+              "validation": "aligned_quote"
+            }
+          ],
+          "limitations": "摘要中未报告数据集的局限性（如类别不平衡、标注者间一致性、扫描仪差异影响、数据集规模对深度学习训练的限制等），也未提供实验验证（如基线模型性能或与传统方法的比较）。由于当前仅提供摘要，无法判断数据构建细节和评估结果。",
+          "prerequisites": "需要了解数字病理图像基本概念（如H&E染色、IHC、ROI、组织分割、细胞检测），以及机器学习/深度学习基础（如语义分割、目标检测、监督学习）。为了深入理解PD-L1评分，还需了解肿瘤免疫微环境和PD-L1表达的临床意义。",
+          "reading_routes": {
+            "ten_minutes": [
+              "阅读摘要全文，理解数据集的目标和三个任务。",
+              "重点看摘要中提到的关键词：TIME、NSCLC、PD-L1 IHC、H&E分割、细胞检测。",
+              "对照摘要中的数字（155 patients, 887 ROIs, 16 classes）记忆数据规模。",
+              "记录“first public NSCLC dataset with manual annotations of H&E in metastatic sites and PD-L1 IHC”这一核心创新点。",
+              "浏览论文中的图表（如果可获得）或补充材料，查看ROI示例和类别标签。"
+            ],
+            "thirty_minutes": [
+              "详细阅读论文的引言部分，了解NSCLC免疫治疗生物标志物开发的背景和现有数据集的不足。",
+              "阅读材料与方法中关于数据收集、标注协议和扫描仪设置的部分，注意多中心/多扫描仪如何处理。",
+              "对照16个分割类别，整理原发性和转移性NSCLC的组织区域类型。",
+              "理解IHC细胞核检测和PD-L1阳性肿瘤细胞检测的具体标注标准（如阳性阈值、细胞类型定义）。",
+              "查找论文中是否给出基线实验或算法评估，记录评价指标和主要结果。",
+              "若论文包含讨论或结论，阅读其关于数据集应用和未来工作的陈述。"
+            ]
+          },
+          "questions": [
+            "16个语义分割类别具体包含哪些组织类型？标注标准是如何定义的？",
+            "数据集包含哪些转移部位？不同转移部位的注释数量分布如何？",
+            "PD-L1 IHC阳性肿瘤细胞的判定阈值（如TPS评分）是什么？由几位病理学家标注？一致性如何？",
+            "使用该数据集进行模型训练时，多中心、多扫描仪差异是否对模型泛化产生显著影响？"
+          ],
+          "confidence": 0.45,
+          "local_connections": [],
+          "local_connection_note": "没有检索到足够相关的本地知识，因此没有强行关联教材。"
+        },
+        "reading_pipeline": {
+          "paper_reader": "论文正文/摘要 → 受证据约束的结构化论文卡",
+          "garden_connector": "论文卡 → 现有本地混合检索与记忆主链 → 经来源编号校验的个性化连接",
+          "local_candidate_count": 0,
+          "accepted_connection_count": 0
+        },
+        "generated_at": "2026-08-27T01:02:23+00:00",
+        "cached": false
+      },
+      "elapsed_seconds": 23.92
+    },
+    {
+      "rank": 3,
+      "field": "脑机接口 × EEG",
+      "doi": "10.1109/ACCESS.2026.3708197",
+      "doi_url": "https://doi.org/10.1109/ACCESS.2026.3708197",
+      "xplore_url": "https://ieeexplore.ieee.org/document/11586018",
+      "title": "Decoding of Imagined Speech Using EEG: An Overview of Techniques, Applications, and Challenges",
+      "venue": "IEEE Access",
+      "publication_date": "2026-01-01",
+      "open_access": true,
+      "oa_status": "gold",
+      "repository_url": "https://doi.org/10.1109/access.2026.3708197",
+      "result": {
+        "title": "Decoding of Imagined Speech Using EEG: An Overview of Techniques, Applications, and Challenges",
+        "url": "https://ieeexplore.ieee.org/document/11586018",
+        "pdf_url": "",
+        "scope": "abstract",
+        "scope_label": "摘要级深读",
+        "source_note": "本次仅依据摘要深读，无法验证完整方法、实验细节和作者全部局限说明。",
+        "fulltext_error": "",
+        "extracted_chars": 1383,
+        "analysis": {
+          "problem": "想象言语的EEG解码在脑机接口中具有潜力，但尚不能转化为实际应用来帮助严重言语或运动障碍患者；同时研究间在实验范式、信号处理流程和评估方法上存在显著差异，限制了进展。",
+          "novelty": "本综述除了定性综合研究外，还进行了探索性随机效应元分析（28项研究），结合元回归和异质性评估，比较不同特征提取和分类方法的解码准确率，并强调标准化数据采集协议及实验设计因素（如刺激选择、提示变化）的影响。",
+          "method": "定性综合（qualitative synthesis）与探索性随机效应元分析（exploratory random effects meta-analysis），并对28项研究的分类准确率进行元回归和异质性评估（I2）。",
+          "concepts": [
+            "imagined speech decoding",
+            "EEG",
+            "brain-computer interface (BCI)",
+            "signal preprocessing",
+            "feature extraction",
+            "classification",
+            "deep learning",
+            "meta-analysis"
+          ],
+          "findings": [
+            {
+              "claim": "想象言语解码作为非侵入性脑机接口中的有前景方法受到关注，但存在转化差距。",
+              "evidence": "Imagined speech decoding from EEG signals has gained increasing attention as a promising approach for enabling intuitive, non-invasive communication in Brain Computer Interface (BCI) systems, however a translational gap remains for individuals with severe speech or motor impairments.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "研究间在实验范式、信号处理流程和评估方法上的显著变异性制约了该领域进展。",
+              "evidence": "Progress in this area has been constrained by substantial variability across studies in experimental paradigms, signal processing pipelines, and evaluation methodologies.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "刺激选择和提示变化等实验设计因素会影响解码性能，但常被忽视。",
+              "evidence": "examines experimental design considerations such as stimulus selection and prompt variation, that influences decoding performance but are often overlooked.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "标准化数据采集协议可提高研究的一致性和可重复性。",
+              "evidence": "The importance of standardized data acquisition protocols is emphasized to improve consistency and reproducibility across studies.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "综述提供了增强EEG信号质量并减少伪迹的预处理技术指导。",
+              "evidence": "Practical guidance is also provided on EEG preprocessing techniques enhancing signal quality and reducing artifacts.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "元分析结果显示，深度学习和频谱/混合特征方法的合并准确率更高。",
+              "evidence": "an exploratory random effects meta-analysis of classification accuracy across 28 studies, with meta-regression and heterogeneity assessment (I2), showed higher pooled accuracies for deep learning and spectral or hybrid feature approaches.",
+              "grounded": true,
+              "validation": "exact_quote"
+            }
+          ],
+          "limitations": "由于当前输入仅为摘要，无法获取该综述完整的方法细节、具体数值结果和作者明确的局限性讨论；因此对上述内容保持较低置信度，需查阅全文进一步确认。",
+          "prerequisites": [
+            "脑电图（EEG）基本原理",
+            "脑机接口（BCI）基本概念",
+            "信号预处理与特征提取方法",
+            "机器学习和深度学习分类模型",
+            "元分析基本概念（如效应量、异质性I2）"
+          ],
+          "reading_routes": {
+            "ten_minutes": [
+              "阅读摘要，明确综述主题：EEG想象言语解码的技术、应用与挑战。",
+              "浏览各节标题，了解综述结构（神经相关、实验设计、预处理、特征提取与分类、元分析、未来方向）。",
+              "阅读引言和结论部分，抓住核心问题与未来研究方向。",
+              "查看元分析的结论语句，了解哪些方法表现更好。"
+            ],
+            "thirty_minutes": [
+              "深入阅读“neural correlates of imagined speech”部分，理解神经基础。",
+              "仔细研读“experimental design considerations”，关注刺激选择和提示变化如何影响解码。",
+              "学习推荐的EEG预处理流程，掌握提高信号质量的具体技术。",
+              "对比不同特征提取和分类方法，结合元分析中的合并准确率判断优劣。",
+              "检查元分析的方法部分，了解效应量计算、元回归和异质性来源。",
+              "记录研究缺口（如泛化模型、多模态整合、多样化数据集）并思考可能的改进方向。"
+            ]
+          },
+          "questions": [
+            "在元分析中，深度学习和频谱/混合特征方法的具体合并准确率数值是多少？",
+            "刺激选择和提示变化是如何量化地影响解码性能的？",
+            "作者推荐的标准数据采集协议具体包含哪些内容？",
+            "跨研究异质性（I2）的主要来源是什么？如何规避？"
+          ],
+          "confidence": 0.6,
+          "local_connections": [],
+          "local_connection_note": "没有检索到足够相关的本地知识，因此没有强行关联教材。"
+        },
+        "reading_pipeline": {
+          "paper_reader": "论文正文/摘要 → 受证据约束的结构化论文卡",
+          "garden_connector": "论文卡 → 现有本地混合检索与记忆主链 → 经来源编号校验的个性化连接",
+          "local_candidate_count": 0,
+          "accepted_connection_count": 0
+        },
+        "generated_at": "2026-08-27T01:03:17+00:00",
+        "cached": false
+      },
+      "elapsed_seconds": 54.66
+    },
+    {
+      "rank": 4,
+      "field": "医学影像 × 肿瘤分割",
+      "doi": "10.1109/TMI.2025.3589797",
+      "doi_url": "https://doi.org/10.1109/TMI.2025.3589797",
+      "xplore_url": "https://ieeexplore.ieee.org/document/11084842",
+      "title": "SegMamba-V2: Long-Range Sequential Modeling Mamba for General 3-D Medical Image Segmentation",
+      "venue": "IEEE Transactions on Medical Imaging",
+      "publication_date": "2025-07-18",
+      "open_access": false,
+      "oa_status": "closed",
+      "repository_url": "",
+      "result": {
+        "title": "SegMamba-V2: Long-Range Sequential Modeling Mamba for General 3-D Medical Image Segmentation",
+        "url": "https://ieeexplore.ieee.org/document/11084842",
+        "pdf_url": "",
+        "scope": "abstract",
+        "scope_label": "摘要级深读",
+        "source_note": "本次仅依据摘要深读，无法验证完整方法、实验细节和作者全部局限说明。",
+        "fulltext_error": "",
+        "extracted_chars": 1569,
+        "analysis": {
+          "problem": "Transformer在三维医学图像分割中虽然能建模全局关系，但处理高维图像时计算负担很大；现有Mamba研究多用于自然语言和二维图像，对三维医学图像的长程依赖能力探索较少。",
+          "novelty": "提出SegMamba-V2，将Mamba应用于三维医学图像分割，通过层次化下采样和tri-orientated spatial Mamba从三个正交平面建模全局依赖，并构建了新的CRC-2000评估基准。",
+          "method": "SegMamba-V2包含两个核心设计：一是层次化尺度下采样策略，用于增强感受野并减轻下采样过程中的信息损失；二是tri-orientated spatial Mamba block，把全局依赖建模从单一平面扩展到三个正交平面。另外收集并标注CRC-2000数据集，并在CRC-2000与另外三个大规模三维医学图像数据集上进行评估。",
+          "concepts": [
+            "State Space Model (SSM)",
+            "Mamba",
+            "3D medical image segmentation",
+            "hierarchical scale downsampling",
+            "tri-orientated spatial Mamba block",
+            "long-range dependency modeling",
+            "CRC-2000 dataset",
+            "whole-volume features"
+          ],
+          "findings": [
+            {
+              "claim": "SegMamba-V2旨在有效捕获每个尺度上全容积特征内的长程依赖。",
+              "evidence": "we propose SegMamba-V2, a novel 3D medical image segmentation model, to effectively capture long-range dependencies within whole-volume features at each scale.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "层次化尺度下采样策略能够增强感受野并减轻下采样信息损失。",
+              "evidence": "we first devise a hierarchical scale downsampling strategy to enhance the receptive field and mitigate information loss during downsampling.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "tri-orientated spatial Mamba block将全局依赖建模从一平面扩展到三个正交平面以改进特征表示。",
+              "evidence": "we design a novel tri-orientated spatial Mamba block that extends the global dependency modeling process from one plane to three orthogonal planes to improve feature representation capability.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "作者构建并标注了一个名为CRC-2000的大规模数据集，用于三维结直肠癌分割的基准评估。",
+              "evidence": "we collect and annotate a large-scale dataset (named CRC-2000) with fine-grained categories to facilitate benchmarking evaluation in 3D colorectal cancer (CRC) segmentation.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "SegMamba-V2在CRC-2000及其他三个大型三维医学图像分割数据集上显著优于当前最优方法。",
+              "evidence": "Experimental results demonstrate that our Segmamba-V2 outperforms state-of-the-art methods by a significant margin, which indicates the universality and effectiveness of the proposed model on 3D medical image segmentation tasks.",
+              "grounded": true,
+              "validation": "exact_quote"
+            }
+          ],
+          "limitations": "摘要中未报告模型的具体计算开销、推理速度、消融实验、数据集规模与类别统计、以及失败案例等信息；也尚未涉及真实临床部署中的泛化性和不确定性。这些只能通过阅读全文或后续论文判断。",
+          "prerequisites": "需要了解Transformer自注意力机制、状态空间模型（特别是Mamba）的基本思想、三维医学图像分割任务（如体素处理）、感受野和下采样对特征图的影响，以及医学图像分割中的评估指标（如Dice）。",
+          "reading_routes": {
+            "ten_minutes": [
+              "通读摘要，标出问题定义、方法创新和主要结果。",
+              "明确背景：Transformer为建模全局关系而计算代价高，Mamba是高效的长程依赖建模新方向。",
+              "抓住两个方法创新：层次化下采样策略和tri-orientated spatial Mamba block。",
+              "记住实验结论：在CRC-2000及三个数据集上超过SOTA。"
+            ],
+            "thirty_minutes": [
+              "阅读引言，理解三维医学图像分割的难点与现有方法局限。",
+              "查阅State Space Model和Mamba的基础原理，对比注意力机制的计算复杂度。",
+              "精读方法与架构：层次化下采样策略如何减少信息损失？tri-orientated block具体如何在三个正交平面扫描？",
+              "查看CRC-2000的收集、标注协议和类别分布。",
+              "分析实验设置：数据集、预处理、训练细节、评估指标和消融研究。",
+              "思考局限与未来方向：计算成本、内存、极端情况等。"
+            ]
+          },
+          "questions": [
+            "层次化尺度下采样策略的具体实现方式是什么？如何定量验证它确实减轻了信息损失？",
+            "tri-orientated spatial Mamba block在三个正交平面上的扫描顺序和融合方式如何设计，计算复杂度相比Transformer有多大优势？",
+            "CRC-2000数据集包含多少病例、何种影像模态、哪些精细类别？标注质量和一致性如何保证？",
+            "SegMamba-V2在哪些临床或解剖结构上分割效果提升最明显？是否存在表现不佳的类别？"
+          ],
+          "confidence": 0.55,
+          "local_connections": [],
+          "local_connection_note": "没有检索到足够相关的本地知识，因此没有强行关联教材。"
+        },
+        "reading_pipeline": {
+          "paper_reader": "论文正文/摘要 → 受证据约束的结构化论文卡",
+          "garden_connector": "论文卡 → 现有本地混合检索与记忆主链 → 经来源编号校验的个性化连接",
+          "local_candidate_count": 0,
+          "accepted_connection_count": 0
+        },
+        "generated_at": "2026-08-27T01:03:58+00:00",
+        "cached": false
+      },
+      "elapsed_seconds": 40.75
+    },
+    {
+      "rank": 5,
+      "field": "神经康复 × 肌电信号",
+      "doi": "10.1109/JBHI.2025.3589889",
+      "doi_url": "https://doi.org/10.1109/JBHI.2025.3589889",
+      "xplore_url": "https://ieeexplore.ieee.org/document/11086512",
+      "title": "A Transformer Framework Informed by Muscle Anatomy and Sequence-to-Sequence Translation for Continuous Joint Kinematics Prediction Using sEMG",
+      "venue": "IEEE Journal of Biomedical and Health Informatics",
+      "publication_date": "2025-07-21",
+      "open_access": false,
+      "oa_status": "closed",
+      "repository_url": "",
+      "result": {
+        "title": "A Transformer Framework Informed by Muscle Anatomy and Sequence-to-Sequence Translation for Continuous Joint Kinematics Prediction Using sEMG",
+        "url": "https://ieeexplore.ieee.org/document/11086512",
+        "pdf_url": "",
+        "scope": "abstract",
+        "scope_label": "摘要级深读",
+        "source_note": "本次仅依据摘要深读，无法验证完整方法、实验细节和作者全部局限说明。",
+        "fulltext_error": "",
+        "extracted_chars": 1416,
+        "analysis": {
+          "problem": "康复机器人实现按需辅助（AAN）控制的关键在于准确预测患者运动意图，现有方法在连续关节运动学预测上存在精度或效率不足。",
+          "novelty": "首次将运动意图预测重新定义为序列到序列的翻译问题，类比sEMG信号为源语言、关节角为目标语言，并提出3DCNN-TF模型。",
+          "method": "3DCNN-TF模型包含三个模块：1) sEMG '句子'生成模块，将多个sEMG滑动窗口编译为'句子'；2) 3DCNN模块，基于肌肉解剖和电极放置提取每个'单词'的肌肉协同特征；3) Transformer模块，自回归生成下一个关节角作为翻译结果。",
+          "concepts": [
+            "sEMG (surface electromyography)",
+            "sequence-to-sequence translation",
+            "3DCNN",
+            "Transformer",
+            "muscle synergy features",
+            "joint kinematics prediction",
+            "assist-as-needed (AAN) control",
+            "nRMSE and R2"
+          ],
+          "findings": [
+            {
+              "claim": "3DCNN-TF模型在连续预测腕部和膝部屈伸角度时，整体性能优于八个基线模型和现有研究。",
+              "evidence": "the 3DCNN-TF model achieves superior overall performance compared to eight baseline models and existing studies in continuously predicting wrist and knee flexion/extension angles across varying speeds.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "3DCNN-TF在预测精度和计算效率之间取得最佳平衡，并表现出卓越的鲁棒性和泛化能力。",
+              "evidence": "the 3DCNN-TF achieves an optimal balance between prediction accuracy and computational efficiency while exhibiting exceptional robustness and generalizability.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "3DCNN-TF在腕部和膝部数据集上的平均nRMSE和R2分别为(6.2%/95.5%)和(5.5%/96.2%)。",
+              "evidence": "the 3DCNN-TF achieves average nRMSE and R2values of (6.2%/95.5%) and (5.5%/96.2%) on wrist and knee datasets, respectively",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "3DCNN-TF的平均训练时间少于两分钟。",
+              "evidence": "with an average training time of less than two minutes.",
+              "grounded": true,
+              "validation": "exact_quote"
+            },
+            {
+              "claim": "3DCNN-TF可以提前最多300毫秒预测关节角而不损失精度，这对实时AAN控制至关重要。",
+              "evidence": "the 3DCNN-TF can predict joint angles up to 300 ms in advance without compromising accuracy, which is critical for real-time AAN control in rehabilitation robots.",
+              "grounded": true,
+              "validation": "exact_quote"
+            }
+          ],
+          "limitations": "当前仅基于摘要，无法判断具体实验设计细节、数据集规模、受试者信息、与基线的统计显著性检验、模型在更多关节或复杂运动上的表现、真实临床环境中的延迟与鲁棒性等。",
+          "prerequisites": "需要了解sEMG信号基本概念、关节运动学、序列到序列模型、Transformer架构、CNN基本原理、回归评价指标（如nRMSE、R2）。",
+          "reading_routes": {
+            "ten_minutes": [
+              "阅读摘要，掌握问题定义（AAN控制中预测运动意图）与核心思想（sEMG到关节角的序列翻译）。",
+              "理解3DCNN-TF的三个模块：sEMG句子生成、3DCNN特征提取、Transformer自回归生成。",
+              "记录关键性能指标：nRMSE/R2、训练时间<2分钟、提前300ms预测。"
+            ],
+            "thirty_minutes": [
+              "精读引言部分，了解现有sEMG预测方法的局限和序列翻译视角的动机。",
+              "重点看方法部分：3DCNN如何根据肌肉解剖和电极位置构建输入张量，以及Transformer如何自回归解码。",
+              "对比实验部分：查看八个基线模型的具体设置和评价指标，理解‘最佳平衡’的依据。",
+              "阅读讨论中关于鲁棒性和泛化的分析，注意是否有消融实验支撑模块有效性。",
+              "若论文公开代码或数据，可尝试复现核心流程并验证指标。"
+            ]
+          },
+          "questions": [
+            "3DCNN模块中如何根据肌肉解剖和电极位置将多通道sEMG组织成‘单词’？具体张量维度是什么？",
+            "Transformer模块的自回归解码过程中，如何利用历史关节角度作为上下文？训练时是否采用教师强制？",
+            "提前300ms预测是在何种实验条件下测得的？是否在不同速度下均成立？",
+            "与基线模型相比，3DCNN-TF在哪些具体运动速度或受试者上表现突出，哪些情况下可能存在不足？"
+          ],
+          "confidence": 0.6,
+          "local_connections": [
+            {
+              "index": 1,
+              "paper_concept": "nRMSE and R2",
+              "title": "BasicEngineeringCircuitAnalysis(JDavidIrwin,RMarkN_0_1772614153788 · 第 177 页",
+              "kind": "textbook",
+              "path": "pdf::D:\\zhangqianyue\\大一夏\\智理杯\\data\\textbook_kb\\BasicEngineeringCircuitAnalysis(JDavidIrwin,RMarkN_0_1772614153788.pdf#page=177",
+              "source_url": "D:\\zhangqianyue\\大一夏\\智理杯\\data\\textbook_kb\\BasicEngineeringCircuitAnalysis(JDavidIrwin,RMarkN_0_1772614153788.pdf",
+              "snippet": "in terms of the voltages υ1 and υ2, we simply eliminate the υa terms from the two node equa- tions. The node equations are υ1 − υo — R2 + υ1 − υa — R1 + υ1 − υ2 — RG = 0 υ2 − υa — R1 + υ2 − υ1 — RG + υ2 — R2 = 0 Combining the two equations to eliminate υa, and then writing υo in …",
+              "matched_terms": [
+                "and",
+                "r2"
+              ],
+              "retrieval_score": 0.7,
+              "mastery": null,
+              "relation_type": "prerequisite",
+              "bridge": "论文概念“nRMSE and R2”与本地《BasicEngineeringCircuitAnalysis(JDavidIrwin,RMarkN_0_1772614153788 · 第 177 页》共同涉及“and、r2”，可把该资料作为前置概念或数学工具的复习入口。",
+              "why_useful": "这里只确认共同概念和可追溯片段，不推断两者的结论等价。",
+              "confidence": 0.82
+            },
+            {
+              "index": 2,
+              "paper_concept": "nRMSE and R2",
+              "title": "an introduction to mechanics · 第 270 页",
+              "kind": "textbook",
+              "path": "pdf::D:\\zhangqianyue\\大一夏\\智理杯\\data\\textbook_kb\\an introduction to mechanics.pdf#page=270",
+              "source_url": "D:\\zhangqianyue\\大一夏\\智理杯\\data\\textbook_kb\\an introduction to mechanics.pdf",
+              "snippet": "248 ANGULAR MOMENTUM AND FIXED AXIS ROTATION The area of one of the thin rings is dA= 2πρ dρ, and its mass is ρ dρ R M dm= M dA A = M2πρ dρ πR2 = 2Mρ dρ R2 . dI=ρ2 dm= 2Mρ3 dρ R2 I= ∫R 0 2Mρ3 dρ R2 = 1 2 MR2. Let us also solve this problem by double integration to illustrate the …",
+              "matched_terms": [
+                "and",
+                "r2"
+              ],
+              "retrieval_score": 0.7,
+              "mastery": null,
+              "relation_type": "prerequisite",
+              "bridge": "论文概念“nRMSE and R2”与本地《an introduction to mechanics · 第 270 页》共同涉及“and、r2”，可把该资料作为前置概念或数学工具的复习入口。",
+              "why_useful": "这里只确认共同概念和可追溯片段，不推断两者的结论等价。",
+              "confidence": 0.82
+            }
+          ],
+          "local_connection_note": "从 2 条本地候选中保留 2 条可解释连接。"
+        },
+        "reading_pipeline": {
+          "paper_reader": "论文正文/摘要 → 受证据约束的结构化论文卡",
+          "garden_connector": "论文卡 → 现有本地混合检索与记忆主链 → 经来源编号校验的个性化连接",
+          "local_candidate_count": 2,
+          "accepted_connection_count": 2
+        },
+        "generated_at": "2026-08-27T01:04:22+00:00",
+        "cached": false
+      },
+      "elapsed_seconds": 23.51
+    }
+  ]
+}

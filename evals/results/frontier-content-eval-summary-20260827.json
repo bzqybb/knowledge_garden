@@ -1,0 +1,36 @@
+{
+  "generated_at": "2026-08-27",
+  "bilibili": {
+    "requested": 10,
+    "transcripts": 10,
+    "guided": 10,
+    "data_source": "ai_subtitle",
+    "median_seconds": 31.64,
+    "max_seconds": 59.07
+  },
+  "wechat": {
+    "requested": 20,
+    "fulltext": 20,
+    "guided": 20,
+    "median_seconds": 11.48,
+    "max_seconds": 111.15
+  },
+  "nature": {
+    "issues": ["8129", "8128"],
+    "toc_total": 123,
+    "research_total": 47,
+    "guided": 47,
+    "news_views": 9,
+    "scope": "issue_summary",
+    "elapsed_seconds": 274.6
+  },
+  "daily_digest": {
+    "seconds": 3.15,
+    "items": 2
+  },
+  "regression_tests": {
+    "passed": 24,
+    "failed": 0
+  },
+  "entrance": "http://127.0.0.1:8765/"
+}

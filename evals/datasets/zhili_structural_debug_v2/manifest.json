@@ -1,0 +1,32 @@
+{
+  "version": 2,
+  "counts": {
+    "development": 96,
+    "transfer_validation": 32,
+    "author_visible_challenge": 12
+  },
+  "policy": {
+    "development": "可用于失败归因和通用规则修改。",
+    "transfer_validation": "规则冻结后运行；一旦用于修改规则，必须降级为 development。",
+    "author_visible_challenge": "作者可见挑战，只做迁移快照，不声称严格盲测。",
+    "strict_blind": "必须由外部保管方在规则冻结后提供，本包不声称拥有严格盲测集。"
+  },
+  "structure_ids": [
+    "S01",
+    "S02",
+    "S03",
+    "S04",
+    "S05",
+    "S06",
+    "S07",
+    "S08",
+    "S09",
+    "S10",
+    "S11",
+    "S12",
+    "S13",
+    "S14",
+    "S15",
+    "S16"
+  ]
+}

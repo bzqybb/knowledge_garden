@@ -195,7 +195,7 @@ def build_semantic_index(
         from sentence_transformers import SentenceTransformer
 
         print(f"Loading embedding model: {model_name}", flush=True)
-        model = SentenceTransformer(model_name, device="cpu")
+        model = SentenceTransformer(model_name, device="cpu", local_files_only=True)
         print(f"Encoding {len(texts)} changed chunks from {encoded_notes} notes...", flush=True)
         encoded_vectors = list(model.encode(texts, batch_size=32, show_progress_bar=True, normalize_embeddings=True))
     for position, vector in zip(encoded_record_positions, encoded_vectors):
@@ -239,12 +239,20 @@ def _load() -> tuple[Any, Any, dict[str, Any]] | None:
             return _CACHE["index"], _CACHE["model"], _CACHE["metadata"]
         import faiss
         import numpy as np
+        import torch
         from sentence_transformers import SentenceTransformer
 
+        from core.inference_runtime import configure_local_inference
+
+        configure_local_inference(torch)
         metadata = json.loads(METADATA_FILE.read_text(encoding="utf-8"))
         index_bytes = np.frombuffer(INDEX_FILE.read_bytes(), dtype="uint8")
         index = faiss.deserialize_index(index_bytes)
-        model = SentenceTransformer(str(metadata["model"]), device="cpu")
+        model = SentenceTransformer(
+            str(metadata["model"]),
+            device="cpu",
+            local_files_only=True,
+        )
         _CACHE.update(key=cache_key, index=index, model=model, metadata=metadata)
         return index, model, metadata
 
@@ -256,11 +264,29 @@ def semantic_search(
     kinds: set[str] | None = None,
     store_notes: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    valid_paths: set[str] | None = None
     if store_notes is not None and METADATA_FILE.is_file():
         metadata_preview = json.loads(METADATA_FILE.read_text(encoding="utf-8"))
         indexed_notes = [note for note in store_notes if note.get("kind") in INDEX_KINDS]
         if metadata_preview.get("signature") != _signature(indexed_notes, str(metadata_preview["model"])):
-            return []
+            old_hashes = metadata_preview.get("note_hashes")
+            if (
+                not isinstance(old_hashes, dict)
+                or metadata_preview.get("schema_version") != INDEX_SCHEMA_VERSION
+                or str(metadata_preview.get("model")) != _model_name()
+            ):
+                return []
+            current_hashes = {
+                str(note["path"]): _content_hash(note) for note in indexed_notes
+            }
+            valid_paths = {
+                str(path) for path, content_hash in old_hashes.items()
+                if current_hashes.get(str(path)) == str(content_hash)
+            }
+            # Reuse only hash-identical pages after small knowledge updates;
+            # changed/deleted pages never leak from an old vector index.
+            if not valid_paths:
+                return []
     loaded = _load()
     if loaded is None or not query.strip():
         return []
@@ -272,6 +298,8 @@ def semantic_search(
         if position < 0:
             continue
         record = metadata["records"][int(position)]
+        if valid_paths is not None and str(record.get("path")) not in valid_paths:
+            continue
         if kinds and record["kind"] not in kinds:
             continue
         item = {**record, "semantic_score": round(float(score), 4)}
@@ -283,6 +311,8 @@ def semantic_search(
     # preserving each neighbour as its own auditable path/title.
     records_by_path: dict[str, list[dict[str, Any]]] = {}
     for record in metadata.get("records", []):
+        if valid_paths is not None and str(record.get("path")) not in valid_paths:
+            continue
         records_by_path.setdefault(str(record.get("path") or ""), []).append(record)
     seeds = sorted(
         best_by_path.values(), key=lambda item: item["semantic_score"], reverse=True,

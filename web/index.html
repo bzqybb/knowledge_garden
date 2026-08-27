@@ -13,7 +13,7 @@
       <div class="brand"><span class="brand-mark">芽</span><div><strong>知识花园</strong><small>Knowledge Garden</small></div></div>
       <nav>
         <button class="nav active" data-view="home"><span>⌂</span> 今日花园</button>
-        <button class="nav" data-view="frontier"><span>⌁</span> 前沿雷达</button>
+        <button class="nav" data-view="frontier"><span>⌁</span> 前沿雷达 <i id="frontier-unread-badge" class="nav-badge" hidden>0</i></button>
         <button class="nav" data-view="garden"><span>✣</span> 知识树</button>
         <button class="nav" data-view="capture"><span>✎</span> 灵感温室</button>
         <button class="nav" data-view="wechat"><span aria-hidden="true">✉</span> 微信苗圃</button>
@@ -65,7 +65,8 @@
         </div>
 
         <article class="panel cards-panel"><div class="panel-head"><div><span class="kicker">NEW BLOOMS</span><h3>最近绽放的对照卡</h3></div><button class="text-btn" data-go="frontier">生成新卡片 →</button></div><div id="recent-cards" class="card-row"></div></article>
-        <article class="panel daily-panel"><div class="panel-head"><div><span class="kicker">DAILY GARDEN POST</span><h3>根据学习画像为你巡视</h3><small id="daily-profile">正在读取兴趣与学习水平……</small></div><button class="text-btn" id="refresh-daily">换一批 →</button></div><div id="daily-digest" class="daily-grid"><div class="empty">园丁正在准备今天的知识推送。</div></div></article>
+        <aside id="frontier-alert" class="frontier-alert" hidden><div><span>NEW FRONTIER</span><b id="frontier-alert-title">发现新的专业前沿</b><small id="frontier-alert-detail"></small></div><div><button id="frontier-notify" class="text-btn" type="button">开启桌面提醒</button><button class="secondary" data-go="frontier" type="button">查看前沿雷达</button></div></aside>
+        <article class="panel daily-panel"><div class="panel-head"><div><span class="kicker">DAILY GARDEN POST</span><h3>根据你的专业、需求与近期学习巡视</h3><small id="daily-profile">正在读取专业方向、兴趣与知识树……</small></div><button class="text-btn" id="refresh-daily">换一批 →</button></div><div id="daily-digest" class="daily-grid"><div class="empty">园丁正在准备今天的知识推送。</div></div></article>
       </section>
 
       <section class="view" id="view-frontier">
@@ -78,7 +79,7 @@
             <button class="primary wide" type="submit">提炼概念并生成对照卡 <span>✦</span></button>
           </form>
           <div>
-            <article class="panel feed-panel"><div class="panel-head"><div><span class="kicker">FOLLOWING</span><h3>博主追踪</h3></div><button id="refresh-feeds" class="text-btn">刷新全部</button></div><form id="feed-form" class="inline-form"><input id="feed-name" placeholder="博主名称" required><input id="feed-url" type="url" placeholder="RSS / Atom 地址" required><button>＋</button></form><div id="feed-list" class="feed-list"></div></article>
+            <article class="panel feed-panel"><div class="panel-head"><div><span class="kicker">FOLLOWING</span><h3>博主追踪</h3></div><button id="refresh-feeds" class="text-btn">刷新全部</button></div><form id="feed-form" class="inline-form"><input id="feed-name" placeholder="博主名称" required><input id="feed-url" type="url" placeholder="B站主页 / 博客 / RSS" required><button>＋</button></form><p class="feed-help">支持 B 站 UP 主、YouTube、GitHub、Substack、Medium 与 RSS / Atom。</p><div id="bilibili-mcp-status" class="source-notice compact-notice">正在检查 Bilibili MCP 字幕能力……</div><div id="feed-list" class="feed-list"></div></article>
             <article class="panel source-panel"><div class="panel-head"><div><span class="kicker">LATEST</span><h3>最新前沿种子</h3></div></div><div id="frontier-notes" class="source-list"></div></article>
           </div>
         </div>
@@ -145,9 +146,9 @@
       <section class="view" id="view-settings">
         <div class="section-intro"><div><span class="kicker">GARDEN TOOLS</span><h2>照料你的花园</h2><p>所有索引都留在本机。网页与 Obsidian 双向同步：原始输入进入 raw/，编译结果进入 wiki/，你的已有笔记不会被静默覆盖。</p></div></div>
         <div class="settings-grid">
-          <form class="panel form-panel" id="settings-form"><h3>Obsidian 与学习画像</h3><label>Vault 文件夹路径<input id="vault-path" placeholder="D:\Notes\MyVault"></label><label>当前知识水平<select id="learning-level"><option>高中基础</option><option selected>本科入门</option><option>本科进阶</option><option>研究生</option><option>领域从业者</option></select></label><label>兴趣关键词<textarea id="interests" rows="3" placeholder="摄影、科幻、音乐、城市漫游……"></textarea></label><button class="primary wide" type="submit">保存并同步 Obsidian</button></form>
+          <form class="panel form-panel" id="settings-form"><h3>Obsidian 与学习画像</h3><label>Vault 文件夹路径<input id="vault-path" placeholder="D:\Notes\MyVault"></label><label>当前知识水平<select id="learning-level"><option>高中基础</option><option selected>本科入门</option><option>本科进阶</option><option>研究生</option><option>领域从业者</option></select></label><label>专业 / 当前重点方向<textarea id="frontier-focus" rows="2" placeholder="例如：材料物理、机器学习；会优先于泛兴趣用于前沿选题"></textarea></label><label>兴趣关键词<textarea id="interests" rows="3" placeholder="摄影、科幻、音乐、城市漫游……"></textarea></label><button class="primary wide" type="submit">保存并同步 Obsidian</button></form>
           <div class="tool-stack">
-            <article class="panel tool-card textbook-tool"><div class="tool-icon">▤</div><div><h3>教材总目录</h3><p>递归发现目录下所有 PDF。第一次建立索引，以后只解析新增或修改过的教材。</p><input id="textbook-directory" placeholder="例如 D:\教材（可包含多层子文件夹）"></div><button id="import-textbooks" class="secondary">增量扫描</button></article>
+            <article class="panel tool-card textbook-tool"><div class="tool-icon">▤</div><div><h3>教材总目录</h3><p>递归发现目录下所有 PDF；扫描版自动使用 Windows 本地中文 OCR，支持后台识别和断点续扫。</p><input id="textbook-directory" placeholder="例如 D:\教材（可包含多层子文件夹）"><small id="textbook-ocr-status">正在检查本地扫描教材识别状态……</small></div><button id="import-textbooks" class="secondary">增量扫描</button></article>
             <article class="panel raw-tool"><div><h3>编译 Raw 资料</h3><p>按 AGENTS.md 规则生成概念底座、降维对照、双向链接与主题 MOC。</p></div><div class="raw-row"><input id="raw-file" placeholder="raw/2026-08-21-example.md"><button id="ingest-raw" class="secondary">执行 Ingest</button></div><small id="link-health">链接闭合状态将在编译后显示</small></article>
             <article class="panel tool-card"><div class="tool-icon">芽</div><div><h3>知识园丁主动巡视</h3><p>扫描 raw 更新，补全知识页、主题索引和 AGENTS.md 来源清单。</p></div><button id="agent-patrol" class="secondary">立即巡视</button></article>
             <article class="panel tool-card"><div class="tool-icon">AI</div><div><h3>个性化讲解</h3><p id="llm-status">正在检测大模型配置……</p></div><span id="llm-badge" class="status-badge">检测中</span></article>

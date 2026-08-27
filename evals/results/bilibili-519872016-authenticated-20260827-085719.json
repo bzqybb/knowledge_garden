@@ -1,0 +1,267 @@
+{
+  "suite": "bilibili_creator_authenticated",
+  "creator": "历史调研室",
+  "uid": "519872016",
+  "requested": 5,
+  "parsed": 2,
+  "boundary": "导读只依据实际取得的字幕；AI字幕可能识别错误，重要主张必须回到时间戳和外部来源复核。",
+  "runtime": {
+    "installed": true,
+    "configured": true,
+    "logged_in": true,
+    "public_subtitle_fallback": true,
+    "source": "global_config",
+    "next_steps": [],
+    "message": "Bilibili MCP 已登录，可以读取字幕。",
+    "data_dir": "D:\\zhangqianyue\\大一夏\\智理杯\\vendor\\bilibili-home\\.bilibili-mcp"
+  },
+  "source_list": "D:\\zhangqianyue\\大一夏\\智理杯\\evals\\results\\bilibili-519872016-latest10-20260827-085719.json",
+  "generated_at": "2026-08-27T08:57:21+08:00",
+  "elapsed_seconds": 109.94,
+  "items": [
+    {
+      "rank": 1,
+      "title": "蒋介石为何能当上黄埔校长？从无名小卒到兵权独揽【 历史调研室 104】",
+      "url": "https://www.bilibili.com/video/BV1JYui6fELE",
+      "status": "error",
+      "error": "{\n  \"error\": true,\n  \"message\": \"No subtitles are available for this video.\",\n  \"message_en\": \"No subtitles are available for this video.\",\n  \"message_zh\": \"该视频没有可用字幕。\",\n  \"code\": \"SUBTITLE_UNAVAILABLE\",\n  \"category\": \"content\",\n  \"retryable\": false,\n  \"user_action_required\": true,\n  \"next_steps_en\": [\n    \"If you expected subtitles, configure Bilibili Cookies.\",\n    \"Run: npx -y @xzxzzx/bilibili-mcp@latest config\",\n    \"Then run: npx -y @xzxzzx/bilibili-mcp@latest check\",\n    \"Do not paste Cookie values into MCP client config files.\",\n    \"If description fallback is acceptable, use get_video_info or retry transcript with fallback_to_description: true.\"\n  ],\n  \"next_steps_zh\": [\n    \"如果你预期该视频应该有字幕，请先配置 Bilibili Cookie。\",\n    \"运行：npx -y @xzxzzx/bilibili-mcp@latest config\",\n    \"然后运行：npx -y @xzxzzx/bilibili-mcp@latest check\",\n    \"不要把 Cookie 值粘贴到 MCP 客户端配置文件中。\",\n    \"如果接受降级为视频简介，请使用 get_video_info，或用 fallback_to_description: true 重试字幕工具。\"\n  ],\n  \"next_steps\": [\n    \"If you expected subtitles, configure Bilibili Cookies.\",\n    \"Run: npx -y @xzxzzx/bilibili-mcp@latest config\",\n    \"Then run: npx -y @xzxzzx/bilibili-mcp@latest check\",\n    \"Do not paste Cookie values into MCP client config files.\",\n    \"If description fallback is acceptable, use get_video_info or retry transcript with fallback_to_description: true.\"\n  ]\n}",
+      "elapsed_seconds": 8.15
+    },
+    {
+      "rank": 2,
+      "title": "从刺杀权贵的革命者到大汉奸，汪精卫为什么转变？【历史调研室103】",
+      "url": "https://www.bilibili.com/video/BV1W4Gw62ErS",
+      "status": "ready",
+      "data_source": "ai_subtitle",
+      "transcript_chars": 98400,
+      "transcript_excerpt": "[00:00:13 --> 00:00:18] 爹娘\n[00:00:20 --> 00:00:22] 顾南晟\n[00:00:22 --> 00:00:25] 你还是人吗\n[00:00:27 --> 00:00:30] 我的好夫人\n[00:00:31 --> 00:00:35] 等会就到你了\n[00:00:36 --> 00:00:39] 男生娶你不过是因为你家庭富裕\n[00:00:39 --> 00:00:42] 如今顾家已是半斤首富\n[00:00:42 --> 00:00:45] 你瑜伽已经没有用了\n[00:00:46 --> 00:00:47] 难受\n[00:00:47 --> 00:00:50] 送他最后一张\n[00:01:00 --> 00:01:03] 不要怕不要怕\n[00:01:03 --> 00:01:05] 我的好夫人\n[00:01:05 --> 00:01:06] 在你走之前\n[00:01:06 --> 00:01:08] 我告诉你一个秘密\n[00:01:09 --> 00:01:17] 其实啊小时候承诺要娶你的人根本不是\n[00:01:17 --> 00:01:25] 我真没想到这个东西居然有这么大的能力\n[00:01:25 --> 00:01:29] 能让你死心塌地的为我们顾家\n[00:01:29 --> 00:01:33] 当年做过这样\n[00:01:36 --> 00:01:40] 你骗我我的好服了\n[00:01:40 --> 00:01:44] 黄泉路上一路走好\n[00:01:54 --> 00:01:58] 大家为夫家倾尽所有\n[00:01:58 --> 00:02:00] 最后却沦为笑话\n[00:02:00 --> 00:02:02] 被错爱10年的丈夫\n[00:02:02 --> 00:02:05] 我也难得去顾\n[00:02:05 -->",
+      "analysis": {
+        "overview": "转录内容并非标题所提示的汪精卫历史分析，而是一部民国背景的虚构复仇短剧/故事：虞姝被丈夫顾南晟欺骗利用并害死后重生，联合堂弟/帮主顾云，在婚宴上反杀妾室秦玉娥，并试图让娘家认清顾南晟的算计，同时卷入口红生意和集资计划。",
+        "key_points": [
+          {
+            "point": "顾南晟承认娶虞姝只为利用其娘家财富，并准备害死她。",
+            "evidence": "男生娶你不过是因为你家庭富裕；如今顾家已是半斤首富，你瑜伽已经没有用了。",
+            "timestamp": "[00:00:31 --> 00:00:45]"
+          },
+          {
+            "point": "虞姝死后重生回到五年前，立誓向顾南晟和秦玉娥复仇。",
+            "evidence": "竟然回到了过去；如今我重活一世，我会让你和其女儿为前世所有的痛苦付出代价。",
+            "timestamp": "[00:02:57 --> 00:04:02]"
+          },
+          {
+            "point": "虞姝与顾云结盟，要求顾云帮忙请少帅出席婚宴，并购买一种叫‘关羽粉’的药物用于设计顾南晟。",
+            "evidence": "是否可以请云老板帮我把少帅请过来参加婚宴；我想问你买一袋药材；关羽粉……会令男人……",
+            "timestamp": "[00:15:23 --> 00:18:56]"
+          },
+          {
+            "point": "婚宴上虞姝设计的陷阱奏效，秦玉娥弟弟在祠堂出丑，少帅到场后顾南晟颜面尽失，升迁无望，秦玉娥被关进黑屋。",
+            "evidence": "少帅顾司令，今日不是你大喜的日子吗？怎么有人比你先进洞房了；来人啊，将秦玉娥关进黑屋。",
+            "timestamp": "[00:29:59 --> 00:35:35]"
+          },
+          {
+            "point": "虞姝向父亲提出与顾南晟离婚，但父亲以家族颜面和养育之恩为由拒绝，甚至与她断绝关系相威胁。",
+            "evidence": "我想和顾南晟离婚；生是顾家的人，死是顾家的鬼，这辈子你别想离开顾南晟。",
+            "timestamp": "[00:40:27 --> 00:43:06]"
+          },
+          {
+            "point": "虞姝请求顾云帮助她让父亲看清顾南晟的真面目，顾云答应做她“刺向敌人的剑”。",
+            "evidence": "顾南晟最近在半经做进口口红……集资1000万进口口红；我答应嫂嫂做嫂嫂刺向敌人的剑。",
+            "timestamp": "[00:46:03 --> 00:47:27]"
+          },
+          {
+            "point": "口红生意短时间内赚到20万大洋，顾家祖母催促顾南晟与虞姝同房以巩固与余家的关系，引起秦玉娥不满。",
+            "evidence": "半个月就赚了20万大洋；你应该多去虞姝的房间住一住；你不可以跟你约房。",
+            "timestamp": "[00:47:28 --> 00:50:49]"
+          }
+        ],
+        "concepts": [
+          "重生复仇",
+          "妻妾斗争/宅斗",
+          "民国军阀家族",
+          "家族联姻与利益",
+          "帮派势力",
+          "近代商业（口红、集资）"
+        ],
+        "caveats": [
+          "转录内容与标题完全不符：全篇未出现关于汪精卫、刺杀权贵或汉奸身份转变的历史讨论，不能据此分析汪精卫。",
+          "转录来自AI字幕，存在大量人名、地名和断句错误，例如‘半斤’应为‘半京’、‘顾南晟’‘虞姝’等可能存在同音混淆，剧情理解会有偏差。",
+          "内容明显是虚构短剧/小说演播，而非历史科普或UP主观点，不应作为史实引用。",
+          "‘关羽粉’等专用名词疑为ASR误识，原文所指并未能从转录中明确确认。"
+        ],
+        "chapter_outline": [
+          {
+            "title": "杀妻与重生",
+            "timestamp": "00:00:13 - 00:04:02",
+            "summary": "虞姝被顾南晟坦白只是利用其家产，随后被杀；她临死前得知真相，重生回五年前，决定复仇。"
+          },
+          {
+            "title": "妻妾交锋",
+            "timestamp": "00:04:02 - 00:08:43",
+            "summary": "虞姝回到婚礼筹备阶段，与秦玉娥在茶盏、聘礼、玉镯等事上发生冲突，顾母偏心，虞姝暂时隐忍。"
+          },
+          {
+            "title": "结识顾云并定计",
+            "timestamp": "00:08:43 - 00:19:00",
+            "summary": "虞姝外出寻找帮手，遇到帮主顾云，揭穿赝品花瓶后与顾云谈判，请其协助邀请少帅并购买药物，计划在婚宴上毁掉顾南晟。"
+          },
+          {
+            "title": "婚宴计划实施",
+            "timestamp": "00:19:00 - 00:29:59",
+            "summary": "秦玉娥要求虞姝送嫁并占其婚服，虞姝佯装答应；婚宴当天，原本要绑架羞辱虞姝的人被顾云提前处理，陷阱反噬秦玉娥。"
+          },
+          {
+            "title": "少帅到场与顾家失势",
+            "timestamp": "00:29:59 - 00:35:35",
+            "summary": "少帅目睹顾家婚宴丑闻，顾南晟失去晋升总司令的机会，迁怒秦玉娥，将其关进黑屋。"
+          },
+          {
+            "title": "口红生意与余家的矛盾",
+            "timestamp": "00:35:35 - 00:43:11",
+            "summary": "秦玉娥仍受宠，提出口红生意计划；虞姝借机发展商业并试图让父亲同意离婚，但父亲坚决反对。"
+          },
+          {
+            "title": "虞姝的身世与顾云结盟",
+            "timestamp": "00:43:11 - 00:47:27",
+            "summary": "闪回揭示虞姝曾是被收养的孤女，被余家家主培养成豪门千金，人生一直被安排；她向顾云坦露复仇目标，顾云答应帮她。"
+          },
+          {
+            "title": "生意成功与新的权力博弈",
+            "timestamp": "00:47:28 - 00:50:49",
+            "summary": "口红生意半月赚20万，顾家祖母逼顾南晟与虞姝圆房以拉拢余家，秦玉娥反对，家庭矛盾继续升级。"
+          }
+        ],
+        "questions": [
+          "虞姝重生后的核心复仇目标是什么？她在婚宴上具体设计了什么陷阱？",
+          "虞姝与顾云合作的交易条件是什么？顾云在计划中承担了什么角色？",
+          "顾南晟的集资计划涉及哪些细节？虞姝为何要阻止父亲出资？",
+          "虞姝父亲拒绝她离婚的根本原因是什么？这与她的身世有什么关系？"
+        ]
+      },
+      "note_id": 4414,
+      "elapsed_seconds": 55.67
+    },
+    {
+      "rank": 3,
+      "title": "中国距离被核爆最近的一次！1969年核危机【 历史调研室 102】",
+      "url": "https://www.bilibili.com/video/BV1FdNc6pEps",
+      "status": "error",
+      "error": "{\n  \"error\": true,\n  \"message\": \"No subtitles are available for this video.\",\n  \"message_en\": \"No subtitles are available for this video.\",\n  \"message_zh\": \"该视频没有可用字幕。\",\n  \"code\": \"SUBTITLE_UNAVAILABLE\",\n  \"category\": \"content\",\n  \"retryable\": false,\n  \"user_action_required\": true,\n  \"next_steps_en\": [\n    \"If you expected subtitles, configure Bilibili Cookies.\",\n    \"Run: npx -y @xzxzzx/bilibili-mcp@latest config\",\n    \"Then run: npx -y @xzxzzx/bilibili-mcp@latest check\",\n    \"Do not paste Cookie values into MCP client config files.\",\n    \"If description fallback is acceptable, use get_video_info or retry transcript with fallback_to_description: true.\"\n  ],\n  \"next_steps_zh\": [\n    \"如果你预期该视频应该有字幕，请先配置 Bilibili Cookie。\",\n    \"运行：npx -y @xzxzzx/bilibili-mcp@latest config\",\n    \"然后运行：npx -y @xzxzzx/bilibili-mcp@latest check\",\n    \"不要把 Cookie 值粘贴到 MCP 客户端配置文件中。\",\n    \"如果接受降级为视频简介，请使用 get_video_info，或用 fallback_to_description: true 重试字幕工具。\"\n  ],\n  \"next_steps\": [\n    \"If you expected subtitles, configure Bilibili Cookies.\",\n    \"Run: npx -y @xzxzzx/bilibili-mcp@latest config\",\n    \"Then run: npx -y @xzxzzx/bilibili-mcp@latest check\",\n    \"Do not paste Cookie values into MCP client config files.\",\n    \"If description fallback is acceptable, use get_video_info or retry transcript with fallback_to_description: true.\"\n  ]\n}",
+      "elapsed_seconds": 12.41
+    },
+    {
+      "rank": 4,
+      "title": "他为苏联造出了最大的氢弹，最后却惨遭流放【历史调研室101】",
+      "url": "https://www.bilibili.com/video/BV1TeTF6vE9c",
+      "status": "ready",
+      "data_source": "ai_subtitle",
+      "transcript_chars": 22212,
+      "transcript_excerpt": "[00:00:00 --> 00:00:01] 那相信这几天大家看完评测\n[00:00:01 --> 00:00:03] 可以跟我得出相同的结论\n[00:00:03 --> 00:00:05] 是近几年来最挤牙膏的一年\n[00:00:05 --> 00:00:08] 尤其对于苹果现在内忧外患的处境来说\n[00:00:08 --> 00:00:10] 就显得更加的离谱\n[00:00:10 --> 00:00:11] 那以防我误会了\n[00:00:11 --> 00:00:11] 苹果\n[00:00:11 --> 00:00:13] 我还特意请到了苏志斌老师\n[00:00:13 --> 00:00:15] 来分享他在产品设计上的独到见解\n[00:00:15 --> 00:00:17] 那在这样一代产品之下\n[00:00:17 --> 00:00:19] 我们能从中看到什么样的趋势\n[00:00:19 --> 00:00:21] 那今年这个牙膏口味有没有变化\n[00:00:21 --> 00:00:24] IPHONE这个产品又将会何去何从\n[00:00:24 --> 00:00:24] 那hello\n[00:00:24 --> 00:00:25] 大家好\n[00:00:25 --> 00:00:27] 欢迎收看这期由昂克赞助播出\n[00:00:27 --> 00:00:28] 两颗皮蛋和摄影观复\n[00:00:28 --> 00:00:31] 联合呈现的IPHONE16深度解析视频\n[00:00:31 --> 00:00:32] 我是初号诺安克\n[00:00:32 --> 00:00:35] 一直致力于为苹果用户提供最优选\n[00:00:35 --> 00:00:38] 这三科为我们带来了与IPHONE搭配绝佳的三款产品\n[00:00:38 --> 00:00:39] 安心冲1",
+      "analysis": {
+        "overview": "视频实际是iPhone 16和Apple Watch 10的深度评测与分析，内容包括影像系统升级、相机控制按键的交互问题、Apple Intelligence的AI布局、产品设计趋势等，与标题“他为苏联造出了最大的氢弹，最后却惨遭流放”完全无关，应为标题党或错误标题。",
+        "key_points": [
+          {
+            "point": "iPhone 16照片画质相比上代没有提升",
+            "evidence": "转录原话：“照片画质跟上代比呢可以说没有变化”，时间戳[00:03:24]",
+            "timestamp": "00:03:24"
+          },
+          {
+            "point": "拍照管线变化主要在后端，为服务于新的色彩风格，前端影响画质的算法没改",
+            "evidence": "转录原话：“今年的拍照管线变化主要偏后端，为的是能够服务于新的色彩风格”和“管线前端真正影响画质的策略和算法呢，这些都没改”，时间戳[00:02:14-00:03:16]",
+            "timestamp": "00:02:14-00:03:16"
+          },
+          {
+            "point": "相机控制按键遭全球媒体负面评价，主要问题是复杂和没必要",
+            "evidence": "转录原话：“对这颗按键的评价呢，可以说是全球媒体心最齐的一次，清一色的负面评价，主要就集中在复杂和没必要这两点上”，时间戳[00:05:27-00:05:36]",
+            "timestamp": "00:05:27-00:05:36"
+          },
+          {
+            "point": "苏志斌认为相机控制按键是为AI准备的，不是为相机",
+            "evidence": "转录原话：“所谓的camera control只是一个缓兵之计，而control的根本不是什么camera，而是还没有实装的AI”，时间戳[00:13:26-00:13:31]",
+            "timestamp": "00:13:26-00:13:31"
+          },
+          {
+            "point": "Apple Watch 10边框变宽是刻意控制产品迭代节奏，而非工程妥协",
+            "evidence": "转录原话：“与其说是工程和设计的妥协，不如说是营销部门的策略，他们有意控制了两代产品的迭代节奏”，时间戳[00:18:30-00:18:42]",
+            "timestamp": "00:18:30-00:18:42"
+          },
+          {
+            "point": "苹果接下来几年的发力方向是轻薄化",
+            "evidence": "转录原话：“从今年的新ipad pro开始，一直到现在的手表轻薄，一定是苹果接下来几年的发力方向”，时间戳[00:20:49-00:20:55]",
+            "timestamp": "00:20:49-00:20:55"
+          }
+        ],
+        "concepts": [
+          "iPhone 16",
+          "Apple Watch 10",
+          "相机控制按钮（Camera Control）",
+          "Apple Intelligence",
+          "影像处理管线",
+          "灵动岛",
+          "黑边与边框设计",
+          "产品轻薄化",
+          "App Intents",
+          "Siri交互设计"
+        ],
+        "caveats": [
+          "转录内容与标题完全不符，可能为标题党或错误标题，视频实际是数码产品评测。",
+          "转录中大量时间为广告内容，分析的部分集中在中间的讨论。",
+          "苏志斌提出的观点为个人推测，不是已确认的事实。",
+          "时间戳基于ASR转录，可能存在分割不精确的情况。"
+        ],
+        "chapter_outline": [
+          {
+            "title": "开场广告与产品引入",
+            "timestamp": "00:00:00-00:02:05",
+            "summary": "介绍iPhone 16评测，包含安克充电产品的广告，提及赞助商和产品特点。"
+          },
+          {
+            "title": "影像系统分析",
+            "timestamp": "00:02:05-00:03:43",
+            "summary": "讨论iPhone 16影像升级，拍照管线后端变化，色彩风格调整，照片画质与上代无差异。"
+          },
+          {
+            "title": "App Intents与AI布局",
+            "timestamp": "00:03:43-00:05:25",
+            "summary": "介绍iOS 18的App Intents特性，控制中心自定义，相机控制按钮与AI的关系，认为苹果是在为AI铺路。"
+          },
+          {
+            "title": "相机控制按键的交互问题",
+            "timestamp": "00:05:25-00:08:29",
+            "summary": "全球媒体负面评价，交互逻辑复杂，功能太多，实际使用效率低，建议开放自定义。"
+          },
+          {
+            "title": "苏志斌的设计师视角解读",
+            "timestamp": "00:08:37-00:15:27",
+            "summary": "从产品图纸分析Apple Watch 10和iPhone 16设计，讨论玻璃厚度、边框变化、内部结构，质疑产品迭代策略。"
+          },
+          {
+            "title": "AI与相机控制的实际指向",
+            "timestamp": "00:15:27-00:18:45",
+            "summary": "通过Siri动画和交互设计，认为AI是手机系统的最高层，相机控制按键是为AI眼睛准备，边框窄化配合视觉表达。"
+          },
+          {
+            "title": "未来预测与总结",
+            "timestamp": "00:18:45-00:22:16",
+            "summary": "预测下一代Apple Watch和iPhone将更轻薄，iPhone 17可能有超薄款，总结苹果当前竞争压力和产品迭代问题。"
+          }
+        ],
+        "questions": [
+          "相机控制按键最终是服务于相机还是AI？",
+          "苹果是否有意控制Apple Watch的迭代节奏以保障下一代销量？",
+          "明年iPhone 17真的会推出超薄款吗？",
+          "苹果的轻薄化方向能否在牺牲电池和影像的情况下实现？"
+        ]
+      },
+      "note_id": 4417,
+      "elapsed_seconds": 24.02
+    },
+    {
+      "rank": 5,
+      "title": "9年内,让国土面积暴增253%!从小国到大国的逆袭【 历史调研室 100】",
+      "url": "https://www.bilibili.com/video/BV1UXEq6TEH4",
+      "status": "error",
+      "error": "{\n  \"error\": true,\n  \"message\": \"No subtitles are available for this video.\",\n  \"message_en\": \"No subtitles are available for this video.\",\n  \"message_zh\": \"该视频没有可用字幕。\",\n  \"code\": \"SUBTITLE_UNAVAILABLE\",\n  \"category\": \"content\",\n  \"retryable\": false,\n  \"user_action_required\": true,\n  \"next_steps_en\": [\n    \"If you expected subtitles, configure Bilibili Cookies.\",\n    \"Run: npx -y @xzxzzx/bilibili-mcp@latest config\",\n    \"Then run: npx -y @xzxzzx/bilibili-mcp@latest check\",\n    \"Do not paste Cookie values into MCP client config files.\",\n    \"If description fallback is acceptable, use get_video_info or retry transcript with fallback_to_description: true.\"\n  ],\n  \"next_steps_zh\": [\n    \"如果你预期该视频应该有字幕，请先配置 Bilibili Cookie。\",\n    \"运行：npx -y @xzxzzx/bilibili-mcp@latest config\",\n    \"然后运行：npx -y @xzxzzx/bilibili-mcp@latest check\",\n    \"不要把 Cookie 值粘贴到 MCP 客户端配置文件中。\",\n    \"如果接受降级为视频简介，请使用 get_video_info，或用 fallback_to_description: true 重试字幕工具。\"\n  ],\n  \"next_steps\": [\n    \"If you expected subtitles, configure Bilibili Cookies.\",\n    \"Run: npx -y @xzxzzx/bilibili-mcp@latest config\",\n    \"Then run: npx -y @xzxzzx/bilibili-mcp@latest check\",\n    \"Do not paste Cookie values into MCP client config files.\",\n    \"If description fallback is acceptable, use get_video_info or retry transcript with fallback_to_description: true.\"\n  ]\n}",
+      "elapsed_seconds": 9.63
+    }
+  ]
+}

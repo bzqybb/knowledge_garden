@@ -17,27 +17,87 @@ ALIAS_GROUPS: tuple[tuple[str, ...], ...] = (
     ("节点电压", "node voltage", "node-voltage analysis", "reference node"),
     ("线性独立", "linearly independent", "independent equations", "N-1"),
     ("电容", "capacitor", "capacitance", "energy storage"),
+    ("电容放电", "capacitor discharge", "charged capacitor", "discharged through a resistor", "RC circuit"),
     ("电感", "inductor", "inductance", "energy storage"),
     ("相机闪光灯", "camera flash", "camera's flash circuit", "xenon lamp"),
     ("能量储存", "energy storage", "stored energy", "capacitor"),
     ("单位正电荷", "unit positive charge", "give up energy", "less energy"),
     ("参考方向", "reference direction", "higher potential", "opposite reference direction"),
     ("矩阵的秩", "矩阵秩", "matrix rank", "rank of a matrix", "linearly independent rows"),
+    ("可逆矩阵", "矩阵可逆", "方阵可逆", "非异矩阵", "invertible matrix", "nonsingular matrix", "matrix inverse"),
+    ("行列式不为零", "非零行列式", "nonzero determinant", "determinant is nonzero", "det(A) != 0"),
+    ("特征值", "eigenvalue", "characteristic root", "characteristic polynomial"),
+    ("特征向量", "eigenvector", "eigenspace", "eigenvector basis"),
     ("运算放大器", "运放", "operational amplifier", "op amp"),
     ("相量", "phasor", "AC steady-state"),
     ("阻抗", "impedance", "AC circuit"),
+    ("简谐运动", "简谐振动", "simple harmonic motion", "SHM", "Hooke's law", "equilibrium"),
+    ("质心运动", "质心", "center of mass", "external force", "total momentum"),
+    ("角动量守恒", "角动量", "angular momentum", "internal torque", "central force"),
+    ("中心力", "central force", "internal torque", "conservation of angular momentum"),
+    ("伽利略变换", "Galilean transformation", "inertial frame", "uniform relative velocity"),
+    ("惯性参考系", "惯性系", "inertial frame", "inertial system"),
+    ("角频率", "振动周期", "angular frequency", "period", "simple harmonic motion"),
+    ("叠加定理", "叠加原理", "superposition", "linear circuit", "nonlinear function"),
+    ("时间常数", "time constant", "five time constants", "steady state"),
+    ("自然响应", "强制响应", "natural response", "forced response", "complementary solution"),
+    ("戴维南", "戴维宁", "Thévenin", "Thevenin", "maximum power transfer"),
+    ("最大功率", "maximum power transfer", "load resistance", "Thévenin"),
+    ("拉格朗日中值定理", "Lagrange 中值定理", "mean value theorem"),
+    ("斯托克斯公式", "Stokes 公式", "Stokes theorem"),
+    ("傅里叶级数", "傅里叶系数", "Fourier 级数", "Fourier series"),
+    ("上三角矩阵", "上三角化", "upper triangular matrix", "triangularization", "Schur decomposition"),
+    ("实对称矩阵", "实对称", "real symmetric matrix", "symmetric matrix", "real eigenvalues"),
+    ("最小多项式", "minimum polynomial", "minimal polynomial", "distinct linear factors"),
+    ("可对角化", "对角化", "diagonalizable", "diagonalization", "eigenbasis"),
+    ("幂零矩阵", "幂零", "nilpotent matrix", "nilpotent", "Jordan decomposition"),
+    ("奇异值分解", "SVD", "singular value decomposition", "singular values"),
+    ("正规矩阵", "normal matrix", "unitarily diagonalizable", "spectral theorem"),
+    ("简谐振子", "谐振子", "harmonic oscillator", "simple harmonic oscillator", "simple harmonic motion"),
+    ("单摆", "simple pendulum", "pendulum", "small angle approximation"),
+    ("哈密顿量", "Hamiltonian", "Hamilton's equations", "canonical momentum"),
+    ("泊松括号", "Poisson bracket", "Hamiltonian dynamics", "canonical equations"),
+    ("有心力", "中心力", "central force", "central-force motion", "angular momentum"),
+    ("无限深势阱", "势阱", "infinite square well", "particle in a box", "energy eigenstates"),
+    ("薛定谔方程", "Schrodinger equation", "Schrödinger equation", "wave function"),
+    ("麦克斯韦方程", "Maxwell equations", "electromagnetic wave", "wave equation"),
+    ("理想气体", "ideal gas", "kinetic theory", "ideal gas law"),
+    ("亥姆霍兹自由能", "Helmholtz free energy", "Helmholtz energy", "constant temperature and volume"),
+    ("恒温恒容", "等温等容", "Helmholtz free energy", "Helmholtz energy", "constant temperature and volume"),
+    ("吉布斯自由能", "Gibbs free energy", "Gibbs energy", "constant temperature and pressure"),
+    ("范特霍夫方程", "van't Hoff equation", "equilibrium constant", "reaction enthalpy"),
+    ("拉乌尔定律", "Raoult's law", "vapor pressure lowering", "ideal solution"),
+    ("反向传播", "backpropagation", "reverse-mode automatic differentiation", "chain rule"),
+    ("线性回归", "linear regression", "least squares", "normal equation"),
+    ("主定理", "主方法", "Master theorem", "recurrence relation", "divide and conquer"),
+    ("快速排序", "quicksort", "quick sort", "partition algorithm"),
+    ("深度优先搜索", "DFS", "depth-first search", "directed cycle"),
+    ("隐马尔可夫模型", "HMM", "hidden Markov model", "Viterbi algorithm"),
+    ("等位基因频率", "等位基因", "allele frequency", "population genetics", "genotype fitness"),
+    ("酶能降低", "酶催化", "enzyme catalysis", "enzymatic catalysis", "enzyme"),
+    ("DNA复制保真", "碱基互补配对", "DNA replication", "base pairing", "polymerase proofreading"),
+    ("氢原子能级", "氢原子", "hydrogen atom", "hydrogenic atom", "radial Schrodinger equation"),
+    ("信息论中的熵", "信息熵", "Shannon entropy", "information entropy", "information theory"),
 )
 
 
 FOUNDATION_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("数学", ("数学", "数学分析", "高等数学", "高数", "微积分", "线性代数", "概率", "统计", "几何",
-           "集合", "函数", "导数", "积分", "极限", "矩阵", "方程", "向量", "张量", "证明", "定理")),
-    ("物理", ("物理", "力学", "电路", "电磁", "热力学", "光学", "量子", "振动", "波", "场", "能量", "功", "动量",
-           "电压", "电流", "电阻", "电荷", "电场")),
-    ("化学", ("化学", "原子", "分子", "化学反应", "有机", "无机", "化学平衡")),
-    ("生物", ("生物", "生理", "细胞", "遗传", "代谢", "进化", "生态")),
-    ("计算机", ("数据结构", "算法", "离散", "复杂度", "数据库", "网络", "操作系统", "编程")),
-    ("哲学", ("逻辑", "哲学", "认识论", "本体论", "伦理")),
+           "集合", "函数", "导数", "积分", "极限", "收敛", "级数", "实数", "完备", "矩阵", "方程",
+           "向量", "张量", "线性变换", "群论", "非交换群", "哥德尔", "黎曼", "勒贝格", "泰勒", "傅里叶", "证明", "定理")),
+    ("物理", ("物理", "力学", "电路", "电磁", "热力学", "光学", "量子", "振动", "波动", "电磁波", "波函数",
+           "电场", "磁场", "力场", "能量", "做功", "动量",
+           "电压", "电流", "电阻", "电荷", "电场", "简谐", "质心", "惯性", "力矩", "角频率",
+           "戴维南", "时间常数", "自然响应", "强制响应", "伽利略", "参考系", "光速", "相对论", "中心力",
+           "单摆", "有心力", "哈密顿", "泊松括号", "势阱", "薛定谔", "麦克斯韦", "干涉条纹")),
+    ("化学", ("化学", "原子", "分子", "化学反应", "有机", "无机", "化学平衡",
+           "热力学", "熵", "焓", "自由能", "反应商", "催化", "价键", "手性", "光谱")),
+    ("生物", ("生物", "生命科学", "生理", "细胞", "遗传", "代谢", "进化", "生态",
+           "基因", "蛋白质", "中心法则", "神经递质", "神经元", "动作电位", "DNA", "RNA", "转录", "翻译")),
+    ("计算机", ("计算机", "数据结构", "算法", "离散", "复杂度", "复杂性", "数据库", "网络", "操作系统", "编程",
+             "机器学习", "深度学习", "监督学习", "无监督学习", "强化学习", "人工智能", "量子计算",
+             "神经网络", "公钥", "对称加密", "RSA", "冯·诺依曼", "哈佛架构", "AI for Science")),
+    ("哲学", ("逻辑", "哲学", "认识论", "本体论", "伦理", "科学史", "科学划界", "范式", "证伪", "库恩", "波普尔", "李约瑟")),
 )
 
 
@@ -71,10 +131,26 @@ def _matched_aliases(text: str) -> list[str]:
         matches.extend(ALIAS_GROUPS[3])
     if re.search(r"(?:节点|node).{0,18}(?:电压|voltage)|(?:电压|voltage).{0,18}(?:节点|node)", text, re.I):
         matches.extend(ALIAS_GROUPS[2])
+    if re.search(r"(?:电容|capacitor).{0,20}(?:放电|discharg)", text, re.I):
+        matches.extend(ALIAS_GROUPS[5])
+    if re.search(r"(?:简谐|harmonic).{0,100}(?:常数|条件|initial)", text, re.I):
+        matches.extend(("initial conditions", "initial position", "initial velocity", "general solution"))
+    if re.search(r"(?:伽利略|Galilean).{0,120}(?:光速|相对论|speed of light)", text, re.I):
+        matches.extend((
+            "special relativity", "speed of light", "uniform relative velocity",
+            "Galilean transformation", "Newtonian space time mass",
+        ))
+    if re.search(r"(?:节点|node).{0,120}(?:KCL|支路电流|branch current)", text, re.I):
+        matches.extend((
+            "nodal analysis", "N-node circuit", "nonreference nodes",
+            "branch currents", "Ohm's law", "five-node network",
+        ))
     return _dedupe(matches)
 
 
 def _question_type(text: str) -> str:
+    if re.search(r"证明|推导|prove|derive", text, re.I):
+        return "proof_or_derivation"
     if re.search(r"区别|比较|异同|versus|\bvs\.?\b", text, re.I):
         return "compare"
     if re.search(r"为什么|为何|原理|机制|why|mechanism", text, re.I):
@@ -114,6 +190,15 @@ def _is_light_path(
 
 
 def _subquestions(text: str) -> list[str]:
+    if re.search(r"证明", text) and re.search(r"充要条件|当且仅当", text):
+        claim = re.sub(r"^(?:请)?证明", "", text).strip(" ：:，,。")
+        specialized: list[str] = []
+        if re.search(r"矩阵.*可逆|可逆.*矩阵", claim) and re.search(r"行列式.*(?:不为零|非零)", claim):
+            specialized = [
+                "矩阵可逆 行列式不为零 必要性 det(A)det(A逆)=1",
+                "行列式不为零 矩阵可逆 充分性 伴随矩阵 逆矩阵",
+            ]
+        return specialized or [f"{claim} 必要性证明", f"{claim} 充分性证明"]
     if len(text) < 28:
         return []
     parts = re.split(r"[；;]|(?:同时|另外|并且|以及|然后)", text)
@@ -122,10 +207,18 @@ def _subquestions(text: str) -> list[str]:
 
 def _detect_foundation_subject(text: str, concepts: list[str]) -> list[str]:
     lowered = text.casefold()
+
+    def signal_matches(signal: str) -> bool:
+        candidate = signal.casefold()
+        if candidate == "化学":
+            # “强化学习” contains the characters 化学 across a word boundary.
+            return bool(re.search(r"(?<!强)化学(?!习)", lowered))
+        return candidate in lowered
+
     fields: list[str] = []
     for field, signals in FOUNDATION_FIELDS:
         for signal in signals:
-            if signal.casefold() in lowered:
+            if signal_matches(signal):
                 fields.append(field)
                 break
     for concept in concepts:
@@ -229,16 +322,19 @@ def build_query_plan(
         # A foundational question can match more than one terminology group,
         # e.g. KCL + linear independence. Keep enough aliases to preserve both
         # the domain term and the mathematical relation in the expanded query.
-        alias_query = " ".join(aliases[:8]).strip()
+        english_aliases = [
+            alias for alias in aliases if re.search(r"[A-Za-z]", alias)
+        ]
+        alias_query = " ".join(english_aliases[:18]).strip()
         if alias_query:
-            candidates.append((f"{resolved} {alias_query}", "bilingual_alias", 0.88))
+            candidates.append((alias_query, "bilingual_alias", 0.98))
     if strategy == "decompose":
-        candidates.extend((item, "decomposition", 0.78) for item in subquestions[:1])
+        candidates.extend((item, "decomposition", 0.84) for item in subquestions[:2])
 
     strategy_limits = {
         "resolved_followup": 1,
         "single_query": 1,
-        "decompose": 1,
+        "decompose": 3,
         "bilingual_expand": 2,
         "semantic_rewrite": 2,
     }

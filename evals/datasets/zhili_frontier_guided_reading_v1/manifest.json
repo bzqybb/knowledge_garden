@@ -1,0 +1,14 @@
+{
+  "suite": "zhili_frontier_guided_reading_v1",
+  "revision": 2,
+  "counts": {
+    "development": 20,
+    "transfer_validation": 10
+  },
+  "policy": {
+    "development": "可用于归因和修改通用规则。",
+    "transfer_validation": "冻结后运行；不得根据答案修改规则。",
+    "author_visible_challenge": "仅作作者可见迁移快照，不声称严格盲测。"
+  },
+  "design_note": "开发集含 10 个一手来源概念与 20 个细粒度任务，归入 10 个推理家族；冻结集使用 10 个完全不同的一手来源概念，测试跨来源同结构迁移。"
+}

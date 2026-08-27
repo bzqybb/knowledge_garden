@@ -10,6 +10,7 @@ DEFAULT_RERANKER_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 RERANKER_SCORE_WEIGHT = 0.04
 RERANKER_RRF_WEIGHT = 1.0
 _LOCK = threading.Lock()
+_PREDICT_LOCK = threading.Lock()
 _CACHE: dict[str, Any] = {}
 
 
@@ -29,6 +30,9 @@ def _load_model() -> Any:
         import torch
         from sentence_transformers import CrossEncoder
 
+        from core.inference_runtime import configure_local_inference
+
+        configure_local_inference(torch)
         model = CrossEncoder(
             model_name,
             device="cpu",
@@ -70,6 +74,9 @@ def rerank_candidates(query: str, candidates: Sequence[dict[str, Any]]) -> list[
     for item in candidates:
         passage = str(item.get("semantic_snippet") or item.get("snippet") or "").strip()
         pairs.append((query, f"{item.get('title', '')}\n{passage}"[:4000]))
-    scores = model.predict(pairs, batch_size=8, show_progress_bar=False)
+    # One CrossEncoder instance is shared by concurrent request threads.
+    # Parallel predict() calls on that CPU model can stall PyTorch for minutes.
+    with _PREDICT_LOCK:
+        scores = model.predict(pairs, batch_size=8, show_progress_bar=False)
     normalized = [float(value) if math.isfinite(float(value)) else 0.0 for value in scores]
     return apply_reranker_scores(candidates, normalized, model_name=_model_name())

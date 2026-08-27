@@ -1,5 +1,6 @@
 ﻿# 数据文件（浏览器、应用缓存等）
 data/
+pip/
 *.db
 *.sqlite
 *.sqlite3

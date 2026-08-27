@@ -99,6 +99,7 @@ class LearningMemoryService:
                         "evidence_layer": result.get("evidence_layer", "none"),
                         "citation_ids": [item.get("id") for item in result.get("citations", [])],
                         "personalization": result.get("personalization", {}),
+                        "reasoning": result.get("reasoning", {}),
                     }, ensure_ascii=False),
                     now,
                 ),
@@ -143,6 +144,39 @@ class LearningMemoryService:
             "question_event_id": event_id,
             "reflection": reflection,
         }
+
+    def complete_capability_turn(
+        self,
+        turn: dict[str, str],
+        *,
+        answer: str,
+        capability: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        """Persist a non-graph assistant turn so it can receive scoped feedback."""
+        assistant_id = self.new_id("message")
+        now = utc_now()
+        with self.store.connect() as conn:
+            conn.execute(
+                """INSERT INTO session_messages(
+                       message_id,session_id,request_id,role,capability,content,metadata_json,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    assistant_id,
+                    turn["session_id"],
+                    turn["request_id"],
+                    "assistant",
+                    capability,
+                    answer,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                    now,
+                ),
+            )
+            conn.execute(
+                "UPDATE sessions SET updated_at=? WHERE session_id=?",
+                (now, turn["session_id"]),
+            )
+        return assistant_id
 
     def record_event(
         self,
@@ -433,7 +467,7 @@ class LearningMemoryService:
                 (request_id,),
             ).fetchone()
             assistant = conn.execute(
-                """SELECT session_id,message_id,metadata_json FROM session_messages
+                """SELECT session_id,message_id,capability,metadata_json FROM session_messages
                    WHERE request_id=? AND role='assistant'
                    ORDER BY created_at DESC,rowid DESC LIMIT 1""",
                 (request_id,),
@@ -444,19 +478,23 @@ class LearningMemoryService:
             raise ValueError("没有找到这轮园丁回答")
         metadata = json.loads(assistant["metadata_json"] or "{}")
         plan = metadata.get("personalization") if isinstance(metadata.get("personalization"), dict) else {}
+        reasoning = metadata.get("reasoning") if isinstance(metadata.get("reasoning"), dict) else {}
         used_claim_ids = [str(value) for value in plan.get("applied_claim_ids", []) if str(value)]
         strategy = str(plan.get("strategy_summary") or "本轮讲解方式").strip()
-        task_key = str(plan.get("task_key") or "general").strip()
+        task_key = str(reasoning.get("task_key") or plan.get("task_key") or "general").strip()
+        capability = str(assistant["capability"] or "gardener_chat")
+        surface = "inspiration" if capability == "inspiration" else "gardener_chat"
         payload = {
             "request_id": request_id,
             "helpful": bool(helpful),
             "feedback_note": feedback_note.strip()[:500],
             "strategy_summary": strategy,
+            "reasoning_type": reasoning.get("type", "general"),
             "applied_claim_ids": used_claim_ids,
             "observation": feedback_note.strip() or ("用户确认本轮讲解方式有帮助" if helpful else "用户明确否定本轮讲解方式"),
         }
         event_id = self.record_event(
-            surface="gardener_chat",
+            surface=surface,
             event_type="personalization_feedback",
             source_kind="explicit",
             session_id=assistant["session_id"],
@@ -492,10 +530,34 @@ class LearningMemoryService:
                 )
                 changed.append({"claim_id": claim_id, "confidence": round(confidence, 3), "status": status})
 
-        # A positive confirmation may become a narrowly scoped, explicit teaching
-        # hypothesis even when this turn intentionally used the standard fallback.
+        # A written correction is itself explicit preference evidence. Previously,
+        # feedback on a standard (non-personalized) answer was logged but could not
+        # affect the next turn because ``used_claim_ids`` was empty. Keep the new
+        # claim task-scoped; cross-task L3 promotion still requires repeated evidence.
         created_claim_id = None
-        if helpful and not used_claim_ids and strategy and strategy != "标准讲解（没有足够个性化证据）":
+        explicit_preference = feedback_note.strip()[:500]
+        if explicit_preference:
+            claim_text = explicit_preference
+            self._upsert_claim(
+                layer=2,
+                dimension="teaching_preference",
+                scope_type="task",
+                scope_key=task_key,
+                claim_text=claim_text,
+                source_kind="explicit",
+                confidence=0.92 if helpful else 0.86,
+                status="active",
+                event_ids=[event_id],
+            )
+            with self.store.connect() as conn:
+                row = conn.execute(
+                    """SELECT claim_id FROM memory_claims WHERE dimension='teaching_preference'
+                       AND scope_type='task' AND scope_key=? AND claim_text=?
+                       ORDER BY updated_at DESC LIMIT 1""",
+                    (task_key, claim_text),
+                ).fetchone()
+            created_claim_id = row["claim_id"] if row else None
+        elif helpful and not used_claim_ids and strategy and strategy != "标准讲解（没有足够个性化证据）":
             claim_text = f"在 {task_key} 类问题中，用户确认“{strategy}”有帮助"
             self._upsert_claim(
                 layer=2,

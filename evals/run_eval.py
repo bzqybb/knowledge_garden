@@ -14,8 +14,10 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from core.config import DB_PATH, RUNTIME_DIR
-from core.credentials import load_secret
+from core.config import DB_PATH
+from evals.judge_config import (
+    LEGACY_KEY_PATH, judge_api_key, judge_base_url, judge_model, judge_request_options,
+)
 from core.storage import GardenStore
 from evals.adapter import load_cases, run_graph_case, run_retrieval_case, temporary_store
 
@@ -23,12 +25,12 @@ from evals.adapter import load_cases, run_graph_case, run_retrieval_case, tempor
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATASET = ROOT / "evals" / "datasets" / "seed_v1.jsonl"
 REPORT_DIR = ROOT / "evals" / "reports"
-KIMI_KEY_PATH = RUNTIME_DIR / "kimi-eval-api-key.dpapi"
+KIMI_KEY_PATH = LEGACY_KEY_PATH
 
 
 def kimi_api_key() -> str:
-    value = os.getenv("KIMI_API_KEY", "").strip() or os.getenv("MOONSHOT_API_KEY", "").strip()
-    return value or load_secret(KIMI_KEY_PATH).strip()
+    """Backward-compatible alias for the generic independent judge key."""
+    return judge_api_key()
 
 
 def _result_value(result: Any) -> float:
@@ -39,7 +41,7 @@ def _result_value(result: Any) -> float:
 def install_ragas_langchain_compat() -> None:
     """Work around Ragas 0.4.3's unconditional import of removed VertexAI paths.
 
-    The evaluation uses an OpenAI-compatible Kimi client and never instantiates
+    The evaluation uses an OpenAI-compatible independent judge and never instantiates
     VertexAI. Keeping the shim here avoids downgrading Knowledge Garden's
     LangChain 1.x runtime while the upstream optional-import fix is pending.
     """
@@ -60,12 +62,13 @@ def install_ragas_langchain_compat() -> None:
 
 async def ragas_scores(row: dict[str, Any], judge: Any) -> dict[str, Any]:
     install_ragas_langchain_compat()
-    from ragas.metrics.collections import ContextPrecision, ContextRecall, Faithfulness
+    from ragas.metrics.collections import AnswerCorrectness, ContextPrecision, ContextRecall, Faithfulness
 
     contexts = [str(item) for item in row.get("retrieved_contexts", []) if str(item).strip()]
     if not contexts:
         return {"context_precision": 0.0, "context_recall": 0.0, "faithfulness": 1.0 if row.get("should_abstain") else 0.0}
     jobs: dict[str, Any] = {}
+    scores: dict[str, Any] = {}
     if "context_precision" not in row:
         jobs["context_precision"] = ContextPrecision(llm=judge).ascore(
             user_input=row["question"], reference=row["reference"], retrieved_contexts=contexts,
@@ -78,13 +81,31 @@ async def ragas_scores(row: dict[str, Any], judge: Any) -> dict[str, Any]:
         jobs["faithfulness"] = Faithfulness(llm=judge).ascore(
             user_input=row["question"], response=row["answer"], retrieved_contexts=contexts,
         )
-    scores: dict[str, Any] = {}
+    if row.get("reference") and row.get("answer") and "answer_correctness" not in row:
+        jobs["answer_correctness"] = AnswerCorrectness(
+            llm=judge, weights=[1.0, 0.0],
+        ).ascore(
+            user_input=row["question"], response=row["answer"], reference=row["reference"],
+        )
+    groups = row.get("evidence_terms", [])
+    if groups and "keypoint_coverage" not in row:
+        from evals.zhili_three_layer import matched_evidence_groups
+
+        scores["keypoint_coverage"] = round(
+            len(matched_evidence_groups(str(row.get("answer", "")), groups)) / len(groups), 4,
+        )
     errors: dict[str, str] = {}
+    metric_timeout = float(os.getenv("JUDGE_METRIC_TIMEOUT_SECONDS", "90"))
     for metric, job in jobs.items():
         print(f"    scoring {metric}...", flush=True)
         try:
-            scores[metric] = _result_value(await job)
+            scores[metric] = _result_value(
+                await asyncio.wait_for(job, timeout=metric_timeout)
+            )
             print(f"    {metric}={scores[metric]:.4f}", flush=True)
+        except TimeoutError:
+            errors[metric] = f"独立裁判单指标超过 {metric_timeout:g} 秒，已取消以继续后续评测"
+            print(f"    {metric} TIMEOUT: {errors[metric]}", flush=True)
         except Exception as exc:
             errors[metric] = evaluation_error(exc)
             print(f"    {metric} ERROR: {errors[metric]}", flush=True)
@@ -96,7 +117,7 @@ async def ragas_scores(row: dict[str, Any], judge: Any) -> dict[str, Any]:
 def evaluation_error(exc: Exception) -> str:
     message = str(exc)
     if "401" in message or "Invalid Authentication" in message:
-        return "Kimi 鉴权失败（401）：请检查密钥所属平台与 API 地址是否匹配。"
+        return "TokenHub 独立裁判鉴权失败（401）：请检查密钥所属平台与 API 地址是否匹配。"
     return f"{type(exc).__name__}: {message[:500]}"
 
 
@@ -104,7 +125,7 @@ def score_status(row: dict[str, Any]) -> str:
     """Render a stable progress line even when one or more judge metrics fail."""
     parts: list[str] = []
     errors = row.get("metric_errors", {})
-    for metric in ("context_precision", "context_recall", "faithfulness"):
+    for metric in ("context_precision", "context_recall", "faithfulness", "answer_correctness"):
         if metric in row:
             parts.append(f"{metric}={float(row[metric]):.4f}")
         elif metric in errors:
@@ -118,38 +139,26 @@ def make_kimi_judge() -> Any:
     install_ragas_langchain_compat()
     from ragas.llms import llm_factory
 
-    key = kimi_api_key()
+    key = judge_api_key()
     if not key:
         raise RuntimeError(
-            "尚未配置 Kimi Judge Key。请运行 .\\run_evals.ps1 -SaveKimiKey，"
-            "或临时设置 KIMI_API_KEY。"
+            "尚未配置独立裁判 Key。请运行 .\\run_evals.ps1 -SaveJudgeKey，"
+            "或临时设置 JUDGE_API_KEY。"
         )
-    model = os.getenv("KIMI_EVAL_MODEL", "kimi-k2.6")
+    model = judge_model()
     client = AsyncOpenAI(
         api_key=key,
-        base_url=os.getenv("KIMI_BASE_URL", "https://api.moonshot.ai/v1").rstrip("/"),
-        timeout=float(os.getenv("JUDGE_TIMEOUT_SECONDS", "600")),
+        base_url=judge_base_url(),
+        timeout=float(os.getenv("JUDGE_TIMEOUT_SECONDS", "90")),
         max_retries=2,
     )
-    model_options: dict[str, Any] = {}
-    # Tencent TokenHub enables deep thinking by default for Kimi K2.x. Ragas
-    # needs concise schema-constrained JSON, for which thinking repeatedly
-    # exhausted even an 8192-token budget. K2.6 officially supports disabling
-    # it; K3 does not, so K3 remains untouched when explicitly selected.
-    if model in {"kimi-k2.6", "kimi-k2.5"}:
-        thinking_type = os.getenv("JUDGE_THINKING", "disabled").strip().lower()
-        if thinking_type not in {"enabled", "disabled"}:
-            thinking_type = "disabled"
-        model_options["extra_body"] = {"thinking": {"type": thinking_type}}
-    default_temperature = "0.6" if model in {"kimi-k2.6", "kimi-k2.5"} and (
-        model_options.get("extra_body", {}).get("thinking", {}).get("type") == "disabled"
-    ) else "1"
+    model_options = judge_request_options(model)
     return llm_factory(
         model,
         client=client,
-        temperature=float(os.getenv("JUDGE_TEMPERATURE", default_temperature)),
+        temperature=float(model_options.pop("temperature")),
         top_p=float(os.getenv("JUDGE_TOP_P", "0.95")),
-        # Kimi K3 may spend a sizeable hidden reasoning budget when Ragas
+        # Thinking models may spend a sizeable hidden reasoning budget when Ragas
         # decomposes a multi-paragraph answer into atomic claims. 4096 caused
         # repeatable IncompleteOutputException failures on faithfulness.
         max_tokens=int(os.getenv("JUDGE_MAX_TOKENS", "8192")),
@@ -162,9 +171,34 @@ def make_kimi_judge() -> Any:
     )
 
 
+RANKED_RETRIEVAL_METRICS = frozenset({
+    "hit_at_5", "hit_at_10", "reciprocal_rank",
+    "recall_at_5", "recall_at_10", "precision_at_5", "precision_at_10",
+})
+
+
 def _mean(rows: list[dict[str, Any]], key: str) -> float | None:
-    values = [float(row[key]) for row in rows if row.get(key) not in {None, ""}]
+    values = [
+        float(row[key]) for row in rows
+        if row.get(key) not in {None, ""}
+        and not (key in RANKED_RETRIEVAL_METRICS and row.get("should_abstain"))
+    ]
     return round(statistics.fmean(values), 4) if values else None
+
+
+def grouped_summary(rows: list[dict[str, Any]], field: str) -> dict[str, dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(str(row.get(field) or "未标注"), []).append(row)
+    metrics = ("hit_at_5", "hit_at_10", "reciprocal_rank", "recall_at_5", "recall_at_10",
+               "retrieval_abstention_correct", "context_precision", "context_recall", "faithfulness",
+               "answer_correctness", "keypoint_coverage")
+    return {
+        name: {"cases": len(items), **{
+            metric: value for metric in metrics if (value := _mean(items, metric)) is not None
+        }}
+        for name, items in groups.items()
+    }
 
 
 def write_report(rows: list[dict[str, Any]], name: str) -> tuple[Path, Path, Path]:
@@ -185,10 +219,35 @@ def write_report(rows: list[dict[str, Any]], name: str) -> tuple[Path, Path, Pat
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(flattened)
-    markdown = [f"# {name} 评测报告", ""]
+    positive = [row for row in rows if not row.get("should_abstain")]
+    boundaries = [row for row in rows if row.get("should_abstain")]
+    markdown = [f"# {name} 评测报告", "", f"- 题目总数：{len(rows)}"]
+    if positive:
+        hit = _mean(positive, "hit_at_5")
+        if hit is not None:
+            markdown.append(f"- 有教材依据的问题：{len(positive)} 题；前五命中率：{hit:.2%}")
+    if boundaries:
+        abstention = _mean(boundaries, "retrieval_abstention_correct")
+        if abstention is not None:
+            markdown.append(f"- 缺失教材边界题：{len(boundaries)} 题；正确拒答率：{abstention:.2%}")
+    markdown.append("")
+    for field, label in (("discipline", "学科"), ("difficulty", "难度")):
+        groups = grouped_summary(rows, field)
+        if len(groups) > 1 or next(iter(groups), "未标注") not in {"未标注", "未分类"}:
+            markdown.extend([f"## 按{label}汇总", ""])
+            for group, scores in groups.items():
+                details = "，".join(
+                    f"{metric}={value:.4f}" for metric, value in scores.items()
+                    if metric != "cases" and isinstance(value, (int, float))
+                )
+                markdown.append(f"- {group}：{scores['cases']} 题" + (f"；{details}" if details else ""))
+            markdown.append("")
     for index, row in enumerate(rows, 1):
         markdown.extend([
             f"## {index}. {row.get('id', '')}", "",
+            f"- 学科：{row.get('discipline', '未分类')}",
+            f"- 难度：{row.get('difficulty', '未标注')}",
+            f"- 推理类型：{row.get('reasoning_type', '')}",
             f"- 分类：{row.get('category', '')}",
             f"- 问题：{row.get('question', '')}",
             f"- 耗时：{row.get('latency_ms', '')} ms", "",
@@ -201,7 +260,7 @@ def write_report(rows: list[dict[str, Any]], name: str) -> tuple[Path, Path, Pat
             markdown.extend(["### 评测错误", "", str(row["evaluation_error"]), ""])
         score_items = [
             f"- {key}: {row[key]:.4f}"
-            for key in ("recall_at_5", "recall_at_10", "precision_at_5", "precision_at_10", "context_precision", "context_recall", "faithfulness")
+            for key in ("recall_at_5", "recall_at_10", "precision_at_5", "precision_at_10", "context_precision", "context_recall", "faithfulness", "answer_correctness", "keypoint_coverage")
             if isinstance(row.get(key), (int, float))
         ]
         if score_items:
@@ -256,25 +315,30 @@ async def main() -> None:
     args = parser.parse_args()
 
     if args.check_judge:
-        key = kimi_api_key()
+        key = judge_api_key()
         if not key:
             raise RuntimeError("尚未配置评测模型 API Key")
         client = AsyncOpenAI(
             api_key=key,
-            base_url=os.getenv("KIMI_BASE_URL", "https://api.moonshot.ai/v1").rstrip("/"),
+            base_url=judge_base_url(),
             timeout=60.0,
             max_retries=0,
         )
         response = await client.chat.completions.create(
-            model=os.getenv("KIMI_EVAL_MODEL", "kimi-k2.6"),
-            messages=[{"role": "user", "content": "只回复 OK"}],
-            max_tokens=8,
+            model=judge_model(),
+            messages=[{"role": "user", "content": "只输出JSON：{\"status\":\"ok\"}"}],
+            response_format={"type": "json_object"},
+            max_tokens=32,
+            **judge_request_options(),
         )
-        print(f"Judge API OK: {response.model}")
+        print(f"Judge API OK: {response.model}; {response.choices[0].message.content}")
         return
 
     os.environ.setdefault("GARDEN_DISABLE_NETWORK", "1")
     os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
+    if args.retrieval_only:
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     cases = load_cases(args.dataset)
     if args.ids.strip():
         selected_ids = {item.strip() for item in args.ids.split(",") if item.strip()}
@@ -292,11 +356,11 @@ async def main() -> None:
             row.pop("evaluation_error", None)
             row.pop("metric_errors", None)
             if not args.resume_scores:
-                for metric in ("context_precision", "context_recall", "faithfulness"):
+                for metric in ("context_precision", "context_recall", "faithfulness", "answer_correctness", "keypoint_coverage"):
                     row.pop(metric, None)
         judge = None if args.skip_judge else make_kimi_judge()
-        judge_model = os.getenv("KIMI_EVAL_MODEL", "kimi-k2.6")
-        safe_model = "".join(char if char.isalnum() or char in "-_" else "-" for char in judge_model)
+        selected_judge_model = judge_model()
+        safe_model = "".join(char if char.isalnum() or char in "-_" else "-" for char in selected_judge_model)
         name = f"ragas-{safe_model}"
         if judge is not None:
             for index, row in enumerate(rows, 1):
@@ -310,8 +374,25 @@ async def main() -> None:
                 write_report(rows, f"{name}-progress")
     elif args.retrieval_only:
         store = GardenStore(args.database)
-        rows = [run_retrieval_case(store, case) for case in cases]
-        name = "retrieval-baseline"
+        rows = []
+        for index, case in enumerate(cases, 1):
+            print(f"[检索] {index}/{len(cases)} {case['id']} | {case['question']}", flush=True)
+            row = run_retrieval_case(store, case)
+            rows.append(row)
+            write_report(rows, f"retrieval-{args.dataset.stem.replace('_', '-')}-progress")
+            outcome = (
+                f"拒答={'正确' if row.get('retrieval_abstention_correct') else '错误'}"
+                if row.get("should_abstain")
+                else f"Hit@5={row.get('hit_at_5', 0):.0f}"
+            )
+            print(
+                f"  首个标准答案页排名={row.get('first_relevant_rank') or '未命中'} "
+                f"{outcome} "
+                f"用时={row.get('latency_ms', 0):.0f}ms",
+                flush=True,
+            )
+        dataset_label = args.dataset.stem.replace("_", "-")
+        name = f"retrieval-{dataset_label}"
     else:
         judge = None if args.skip_judge else make_kimi_judge()
         rows = []
@@ -323,17 +404,18 @@ async def main() -> None:
                 print(f"[Garden] {index}/{len(cases)} {case['id']} | {case['question']}", flush=True)
                 row = run_graph_case(store, case)
             rows.append(row)
+            write_report(rows, "garden-generation-progress")
             print(
                 f"  latency={row.get('latency_ms')}ms evidence={row.get('evidence_layer')} "
                 f"sources={row.get('used_source_ids')}",
                 flush=True,
             )
-        judge_model = os.getenv("KIMI_EVAL_MODEL", "kimi-k2.6")
-        safe_model = "".join(char if char.isalnum() or char in "-_" else "-" for char in judge_model)
+        selected_judge_model = judge_model()
+        safe_model = "".join(char if char.isalnum() or char in "-_" else "-" for char in selected_judge_model)
         name = f"ragas-{safe_model}"
         if judge is not None:
             for index, row in enumerate(rows, 1):
-                print(f"[Kimi Judge] {index}/{len(rows)} {row['id']} | {row['question']}", flush=True)
+                print(f"[Independent Judge] {index}/{len(rows)} {row['id']} | {row['question']}", flush=True)
                 try:
                     row.update(await ragas_scores(row, judge))
                     print(f"  {score_status(row)}", flush=True)
@@ -346,10 +428,20 @@ async def main() -> None:
     json_path, csv_path, markdown_path = write_report(rows, name)
     metric_names = [
         "recall_at_5", "recall_at_10", "precision_at_5", "precision_at_10",
-        "context_precision", "context_recall", "faithfulness", "latency_ms", "query_count",
+        "hit_at_5", "hit_at_10", "reciprocal_rank", "retrieval_abstention_correct",
+        "context_precision", "context_recall", "faithfulness", "answer_correctness",
+        "keypoint_coverage", "latency_ms", "query_count",
     ]
-    summary = {key: _mean(rows, key) for key in metric_names if _mean(rows, key) is not None}
-    print(json.dumps({"cases": len(rows), "summary": summary}, ensure_ascii=False, indent=2))
+    summary = {
+        "answerable_cases": sum(not bool(row.get("should_abstain")) for row in rows),
+        "abstention_cases": sum(bool(row.get("should_abstain")) for row in rows),
+        **{key: _mean(rows, key) for key in metric_names if _mean(rows, key) is not None},
+    }
+    print(json.dumps({
+        "cases": len(rows), "summary": summary,
+        "by_discipline": grouped_summary(rows, "discipline"),
+        "by_difficulty": grouped_summary(rows, "difficulty"),
+    }, ensure_ascii=False, indent=2))
     print(f"JSON report: {json_path}")
     print(f"CSV report:  {csv_path}")
     print(f"Markdown:    {markdown_path}")

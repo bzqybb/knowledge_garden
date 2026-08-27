@@ -5,6 +5,7 @@ import ipaddress
 import re
 import socket
 import time
+from xml.etree import ElementTree
 from datetime import date
 from html import unescape
 from html.parser import HTMLParser
@@ -17,6 +18,62 @@ from urllib.request import Request, urlopen
 
 OPENALEX_API = "https://api.openalex.org/works"
 CROSSREF_API = "https://api.crossref.org/works"
+BING_RSS_SEARCH = "https://www.bing.com/search"
+
+
+def search_public_web(query: str, limit: int = 5, timeout: int = 8) -> list[dict[str, Any]]:
+    """Find public pages without an API key, preserving attributable snippets.
+
+    Search results are evidence only for what their title and snippet actually
+    say. Institutional domains are ranked first, but no arbitrary result URL is
+    fetched, so this function cannot become an SSRF proxy.
+    """
+    cleaned_query = query.strip()
+    if not cleaned_query:
+        return []
+    params = urlencode({
+        "q": cleaned_query,
+        "format": "rss",
+        "count": max(1, min(limit, 8)),
+    })
+    request = Request(
+        f"{BING_RSS_SEARCH}?{params}",
+        headers={
+            "User-Agent": "Mozilla/5.0 KnowledgeGarden/1.0 (public-source lookup)",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
+        },
+    )
+    with urlopen(request, timeout=timeout) as response:
+        payload = response.read(1_000_001)
+    if len(payload) > 1_000_000:
+        raise ValueError("公开网页检索结果过大")
+    root = ElementTree.fromstring(payload)
+    results: list[dict[str, Any]] = []
+    for item in root.findall("./channel/item"):
+        title = unescape(str(item.findtext("title") or "")).strip()
+        url = str(item.findtext("link") or "").strip()
+        parsed = urlparse(url)
+        if not title or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            continue
+        description = re.sub(r"<[^>]+>", " ", str(item.findtext("description") or ""))
+        description = re.sub(r"\s+", " ", unescape(description)).strip()
+        if not description:
+            continue
+        hostname = parsed.hostname.casefold()
+        official = hostname.endswith((".edu.cn", ".ac.cn", ".gov.cn", ".edu", ".gov"))
+        results.append({
+            "title": title,
+            "url": url,
+            "abstract": description[:1800],
+            "year": None,
+            "authors": [],
+            "venue": hostname,
+            "source": "机构官网" if official else "公开网页",
+            "source_type": "official_docs" if official else "public_web",
+            "official": official,
+        })
+    results.sort(key=lambda result: result["official"], reverse=True)
+    return results[:max(1, min(limit, 8))]
 
 
 class _WeChatArticleParser(HTMLParser):
@@ -91,15 +148,23 @@ def _article_from_work(work: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _safe_public_https(url: str) -> bool:
+def _safe_public_https(url: str, *, attempts: int = 3) -> bool:
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
         return False
-    try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)}
-        return bool(addresses) and all(ipaddress.ip_address(value).is_global for value in addresses)
-    except (OSError, ValueError):
-        return False
+    for attempt in range(max(1, attempts)):
+        try:
+            addresses = {
+                item[4][0]
+                for item in socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+            }
+            return bool(addresses) and all(
+                ipaddress.ip_address(value).is_global for value in addresses
+            )
+        except (OSError, ValueError):
+            if attempt + 1 < max(1, attempts):
+                time.sleep(0.25 * (attempt + 1))
+    return False
 
 
 def fetch_open_access_pdf_text(

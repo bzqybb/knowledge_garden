@@ -12,6 +12,13 @@ class LLMError(RuntimeError):
     pass
 
 
+def _primary_provider_options(config: LLMConfig) -> dict[str, Any]:
+    """Keep GLM's structured teaching answers responsive and JSON-compatible."""
+    if "bigmodel.cn" in config.base_url.casefold():
+        return {"extra_body": {"thinking": {"type": "disabled"}}}
+    return {}
+
+
 def _invoke_with_hard_timeout(function: Any, timeout: float, label: str) -> Any:
     """Enforce a wall-clock deadline even if a provider socket ignores timeout.
 
@@ -63,6 +70,7 @@ def _model():
         temperature=0.3,
         timeout=60,
         max_retries=2,
+        **_primary_provider_options(config),
     )
 
 
@@ -81,6 +89,7 @@ def chat(system: str, user: str, *, temperature: float = 0.3, json_mode: bool = 
         timeout=60,
         max_retries=2,
         model_kwargs={"response_format": {"type": "json_object"}} if json_mode else {},
+        **_primary_provider_options(config),
     )
     chain = prompt | model | StrOutputParser()
     try:
@@ -109,6 +118,7 @@ def chat_json(
         timeout=timeout,
         max_retries=max_retries,
         model_kwargs={"response_format": {"type": "json_object"}},
+        **_primary_provider_options(config),
     )
     chain = prompt | model | parser
     try:
@@ -179,7 +189,7 @@ def _configured_json_model(
 def understanding_chat_json(
     system: str, user: str, *, timeout: float = 6, max_retries: int = 0,
 ) -> tuple[dict[str, Any] | None, str]:
-    """Use GLM for question understanding without stacking two slow calls.
+    """Use the configured low-latency understanding route.
 
     A timeout or provider failure has already consumed the interaction budget,
     so the caller uses its deterministic, auditable parser instead of waiting
@@ -188,22 +198,31 @@ def understanding_chat_json(
     config = understanding_llm_config()
     if config.enabled:
         try:
-            return _chat_json_with_config(
+            payload = _chat_json_with_config(
                 config, system, user, timeout=timeout, max_retries=max_retries,
-            ), f"glm:{config.model}"
-        except LLMError as glm_error:
+            )
+            family = "glm" if (
+                "bigmodel.cn" in config.base_url.casefold()
+                or config.model.casefold().startswith("glm")
+            ) else "deepseek"
+            return payload, f"{family}:{config.model}"
+        except LLMError as model_error:
             _configured_json_model.cache_clear()
-            message = str(glm_error)
-            reason = "rate_limited" if "429" in message or "1305" in message else "unavailable"
-            return None, f"deterministic-fallback-after-glm-{reason}"
+            message = str(model_error)
+            reason = (
+                "rate_limited"
+                if any(marker in message for marker in ("429", "1305", "1113"))
+                else "unavailable"
+            )
+            return None, f"deterministic-fallback-after-understanding-{reason}"
     return chat_json(system, user, timeout=timeout, max_retries=max_retries), "primary-model-fallback"
 
 
 def prewarm_understanding_model() -> tuple[bool, str]:
-    """Warm the dedicated parser connection without blocking server startup."""
+    """Warm the parser connection without blocking server startup."""
     config = understanding_llm_config()
     if not config.enabled:
-        return False, "GLM 问题理解未配置"
+        return False, "问题理解模型未配置"
     try:
         payload, provider = understanding_chat_json(
             "只输出 JSON：{\"ready\":true}。不解释。",
@@ -212,5 +231,5 @@ def prewarm_understanding_model() -> tuple[bool, str]:
             max_retries=0,
         )
     except Exception as exc:
-        return False, f"GLM 预热失败：{exc.__class__.__name__}"
+        return False, f"问题理解模型预热失败：{exc.__class__.__name__}"
     return bool(payload), f"{provider} 预热{'完成' if payload else '跳过'}"

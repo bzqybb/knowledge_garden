@@ -10,13 +10,33 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $projectRoot
+$storageRoot = Join-Path $projectRoot "data"
+$env:GARDEN_TEMP_DIR = Join-Path $storageRoot "tmp"
+$env:GARDEN_CACHE_DIR = Join-Path $storageRoot "cache"
+$env:GARDEN_MODEL_CACHE_DIR = Join-Path $storageRoot "models"
+foreach ($directory in @($env:GARDEN_TEMP_DIR, $env:GARDEN_CACHE_DIR, $env:GARDEN_MODEL_CACHE_DIR)) {
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+}
+$env:TEMP = $env:GARDEN_TEMP_DIR
+$env:TMP = $env:GARDEN_TEMP_DIR
+$env:TMPDIR = $env:GARDEN_TEMP_DIR
+$env:XDG_CACHE_HOME = $env:GARDEN_CACHE_DIR
+$env:HF_HOME = Join-Path $env:GARDEN_MODEL_CACHE_DIR "huggingface"
+$env:HUGGINGFACE_HUB_CACHE = Join-Path $env:HF_HOME "hub"
+$env:TRANSFORMERS_CACHE = Join-Path $env:HF_HOME "transformers"
+$env:SENTENCE_TRANSFORMERS_HOME = Join-Path $env:GARDEN_MODEL_CACHE_DIR "sentence-transformers"
+$env:TORCH_HOME = Join-Path $env:GARDEN_MODEL_CACHE_DIR "torch"
+$env:PIP_CACHE_DIR = Join-Path $env:GARDEN_CACHE_DIR "pip"
+if (-not $env:GARDEN_UNDERSTANDING_PROVIDER) {
+    $env:GARDEN_UNDERSTANDING_PROVIDER = "primary"
+}
 if ($Python -eq "python") {
     $projectPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
     if (Test-Path -LiteralPath $projectPython) { $Python = $projectPython }
 }
 
 $runtimeDir = Join-Path $projectRoot "data\runtime"
-$credentialPath = Join-Path $runtimeDir "garden-api-key.dpapi"
+$credentialPath = Join-Path $runtimeDir "glm-generator-api-key.dpapi"
 $keyInjected = $false
 
 function Set-GardenProcessApiKey([Security.SecureString]$SecureKey) {
@@ -62,7 +82,7 @@ if ($SaveApiKey) {
     }
 }
 elseif ($AskForApiKey) {
-    $secureKey = Read-Host "Paste the DeepSeek API Key (hidden; cleared when the service stops)" -AsSecureString
+    $secureKey = Read-Host "Paste the GLM Coding Plan API Key (hidden; cleared when the service stops)" -AsSecureString
     try {
         Set-GardenProcessApiKey $secureKey
     }
@@ -71,8 +91,33 @@ elseif ($AskForApiKey) {
     }
     $keyInjected = $true
 }
-if (-not $env:GARDEN_BASE_URL) { $env:GARDEN_BASE_URL = "https://api.deepseek.com" }
-if (-not $env:GARDEN_MODEL) { $env:GARDEN_MODEL = "deepseek-v4-flash" }
+$glmCredentialPath = Join-Path $runtimeDir "understanding-api-key.dpapi"
+$useSavedGarden = Test-Path -LiteralPath $credentialPath
+$useSavedGlm = (-not $env:GARDEN_API_KEY) -and (-not $useSavedGarden) -and (Test-Path -LiteralPath $glmCredentialPath)
+if (-not $env:GARDEN_BASE_URL) {
+    if ($useSavedGlm) {
+        $env:GARDEN_BASE_URL = if ($env:GARDEN_UNDERSTANDING_BASE_URL) {
+            $env:GARDEN_UNDERSTANDING_BASE_URL
+        } else {
+            "https://open.bigmodel.cn/api/coding/paas/v4"
+        }
+    } elseif ($useSavedGarden) {
+        $env:GARDEN_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
+    } else {
+        $env:GARDEN_BASE_URL = "https://api.deepseek.com"
+    }
+}
+if (-not $env:GARDEN_MODEL) {
+    if ($env:GARDEN_BASE_URL -match "bigmodel\.cn") {
+        $env:GARDEN_MODEL = if ($env:GARDEN_UNDERSTANDING_MODEL) {
+            $env:GARDEN_UNDERSTANDING_MODEL
+        } else {
+            "glm-4.5-airx"
+        }
+    } else {
+        $env:GARDEN_MODEL = if ($useSavedGarden -or $useSavedGlm) { "glm-5.2" } else { "deepseek-v4-pro" }
+    }
+}
 if (-not $env:DEEPDIAGRAM_BASE_URL) { $env:DEEPDIAGRAM_BASE_URL = "http://127.0.0.1:8000" }
 if (-not $env:DEEPDIAGRAM_TIMEOUT_SECONDS) { $env:DEEPDIAGRAM_TIMEOUT_SECONDS = "45" }
 

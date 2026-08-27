@@ -1,0 +1,166 @@
+{
+  "suite": "bilibili_creator_authenticated",
+  "creator": "历史调研室",
+  "uid": "519872016",
+  "requested": 5,
+  "parsed": 2,
+  "boundary": "导读只依据实际取得的字幕；AI字幕可能识别错误，重要主张必须回到时间戳和外部来源复核。",
+  "runtime": {
+    "installed": true,
+    "configured": true,
+    "logged_in": true,
+    "public_subtitle_fallback": true,
+    "source": "global_config",
+    "next_steps": [],
+    "message": "Bilibili MCP 已登录，可以读取字幕。",
+    "data_dir": "D:\\zhangqianyue\\大一夏\\智理杯\\vendor\\bilibili-home\\.bilibili-mcp"
+  },
+  "source_list": "D:\\zhangqianyue\\大一夏\\智理杯\\evals\\results\\bilibili-519872016-latest10-20260827-085719.json",
+  "generated_at": "2026-08-27T09:11:25+08:00",
+  "elapsed_seconds": 118.47,
+  "items": [
+    {
+      "rank": 1,
+      "title": "蒋介石为何能当上黄埔校长？从无名小卒到兵权独揽【 历史调研室 104】",
+      "url": "https://www.bilibili.com/video/BV1JYui6fELE",
+      "status": "error",
+      "error": "{\n  \"error\": true,\n  \"message\": \"Local ASR is not ready.\",\n  \"message_en\": \"Local ASR is not ready.\",\n  \"message_zh\": \"本地 ASR 尚未就绪。\",\n  \"code\": \"ASR_NOT_READY\",\n  \"category\": \"runtime\",\n  \"retryable\": false,\n  \"user_action_required\": true,\n  \"next_steps_en\": [\n    \"Run `npx -y @xzxzzx/bilibili-mcp@latest setup` outside the MCP call.\",\n    \"Inspect `npx -y @xzxzzx/bilibili-mcp@latest doctor --json` before retrying.\"\n  ],\n  \"next_steps_zh\": [\n    \"请在 MCP 调用之外运行 `npx -y @xzxzzx/bilibili-mcp@latest setup`。\",\n    \"重试前请检查 `npx -y @xzxzzx/bilibili-mcp@latest doctor --json`。\"\n  ],\n  \"next_steps\": [\n    \"Run `npx -y @xzxzzx/bilibili-mcp@latest setup` outside the MCP call.\",\n    \"Inspect `npx -y @xzxzzx/bilibili-mcp@latest doctor --json` before retrying.\"\n  ]\n}",
+      "elapsed_seconds": 18.24
+    },
+    {
+      "rank": 2,
+      "title": "从刺杀权贵的革命者到大汉奸，汪精卫为什么转变？【历史调研室103】",
+      "url": "https://www.bilibili.com/video/BV1W4Gw62ErS",
+      "status": "ready",
+      "data_source": "ai_subtitle",
+      "transcript_chars": 1801,
+      "transcript_excerpt": "[00:00:00 --> 00:00:01] Sai qui\n[00:00:01 --> 00:00:02] ♪ Can't you see ♪\n[00:00:03 --> 00:00:06] ♪ I'm calling sky ♪\n[00:00:06 --> 00:00:07] ♪ Like yous ♪\n[00:00:07 --> 00:00:11] I'm falling\n[00:00:11 --> 00:00:14] ♪ 通关倒下了 ♪\n[00:00:14 --> 00:00:16] 天下小蛮腰飞\n[00:00:16 --> 00:00:18] 有一只小鸟飞多高\n[00:00:18 --> 00:00:24] 就让一起睡上高啊啊林子不要剪啊\n[00:00:24 --> 00:00:25] 你剪吧\n[00:00:25 --> 00:00:27] 哇啊啊啊\n[00:00:27 --> 00:00:32] ♪ 做好事不让人知道他啊 ♪\n[00:00:32 --> 00:00:33] 是是非非\n[00:00:33 --> 00:00:34] ♪ 惹人恼 ♪\n[00:00:34 --> 00:00:38] ♪ 啊啊啊啊啊 ♪\n[00:00:38 --> 00:00:42] 老江和河马老高\n[00:00:42 --> 00:00:44] ♪ 看我浪迹多逍遥 ♪\n[00:00:44 --> 00:00:45] 谁是男生\n[00:00:45 --> 00:00:49] ♪ 谁知道天下第二也挺好 ♪\n[00:00:49 --> 00:00:53] 风和雨来的刚好谁比我的武功高\n[00:00:53 --> 00:00:56] 怕地上的红山腰\n[00:00:56 --> 00:00:58] ♪ 山湖危险快点 ♪\n[00:00:58 --> 00:01:00] ♪ 江河湖泊浪滔滔 ♪\n[",
+      "analysis": {
+        "overview": "提供的ASR转录内容与视频标题严重不符，转录主要是歌曲歌词和零散对话，没有提及汪精卫或任何历史分析。因此，无法根据该转录对标题所述内容进行有效导读。",
+        "key_points": [
+          {
+            "point": "转录内容为背景音乐和歌词，非历史讲解。",
+            "evidence": "转录中大量出现歌词如'Can't you see'、'天下第二也挺好'等。",
+            "timestamp": "00:00:03-00:01:07"
+          },
+          {
+            "point": "转录中没有出现与汪精卫相关的任何实质性内容。",
+            "evidence": "转录中未提及汪精卫、革命者、汉奸等关键词。",
+            "timestamp": "00:00:00-00:01:53"
+          },
+          {
+            "point": "转录包含少量无关闲聊，如'你剪吧'、'请开始你的表演'，可能与视频主题无关。",
+            "evidence": "转录中00:00:24-00:00:27出现'你剪吧'，00:01:02-00:01:03出现'请开始你的表演'。",
+            "timestamp": "00:00:24-00:00:27, 00:01:02-00:01:03"
+          }
+        ],
+        "concepts": [],
+        "caveats": "ASR转录质量低下，可能仅捕获了视频开头的音乐部分，无法反映完整视频内容。任何关于汪精卫转变的分析均未在转录中体现。",
+        "chapter_outline": [],
+        "questions": [
+          "能否提供更完整的视频转录或片段时间戳？",
+          "该转录是否来自正确的视频？",
+          "视频中是否包含实际讲解内容？"
+        ]
+      },
+      "note_id": 4414,
+      "elapsed_seconds": 41.18
+    },
+    {
+      "rank": 3,
+      "title": "中国距离被核爆最近的一次！1969年核危机【 历史调研室 102】",
+      "url": "https://www.bilibili.com/video/BV1FdNc6pEps",
+      "status": "error",
+      "error": "{\n  \"error\": true,\n  \"message\": \"Local ASR is not ready.\",\n  \"message_en\": \"Local ASR is not ready.\",\n  \"message_zh\": \"本地 ASR 尚未就绪。\",\n  \"code\": \"ASR_NOT_READY\",\n  \"category\": \"runtime\",\n  \"retryable\": false,\n  \"user_action_required\": true,\n  \"next_steps_en\": [\n    \"Run `npx -y @xzxzzx/bilibili-mcp@latest setup` outside the MCP call.\",\n    \"Inspect `npx -y @xzxzzx/bilibili-mcp@latest doctor --json` before retrying.\"\n  ],\n  \"next_steps_zh\": [\n    \"请在 MCP 调用之外运行 `npx -y @xzxzzx/bilibili-mcp@latest setup`。\",\n    \"重试前请检查 `npx -y @xzxzzx/bilibili-mcp@latest doctor --json`。\"\n  ],\n  \"next_steps\": [\n    \"Run `npx -y @xzxzzx/bilibili-mcp@latest setup` outside the MCP call.\",\n    \"Inspect `npx -y @xzxzzx/bilibili-mcp@latest doctor --json` before retrying.\"\n  ]\n}",
+      "elapsed_seconds": 11.08
+    },
+    {
+      "rank": 4,
+      "title": "他为苏联造出了最大的氢弹，最后却惨遭流放【历史调研室101】",
+      "url": "https://www.bilibili.com/video/BV1TeTF6vE9c",
+      "status": "ready",
+      "data_source": "ai_subtitle",
+      "transcript_chars": 3775,
+      "transcript_excerpt": "[00:00:00 --> 00:00:02] 苹果手机到底有没有必要贴镜头膜\n[00:00:02 --> 00:00:03] 在这里想问一下大家\n[00:00:03 --> 00:00:05] 对于手机镜头贴不贴膜有什么意见\n[00:00:05 --> 00:00:08] 有一部分人觉得贴这破玩意买了降低画质\n[00:00:08 --> 00:00:08] 还降智\n[00:00:08 --> 00:00:10] 除了一些拍照爱好者之外\n[00:00:10 --> 00:00:12] 大部分人的作用就是扫码就够了\n[00:00:12 --> 00:00:13] 而另一部分人则认为\n[00:00:13 --> 00:00:15] 随着镜头越做越大\n[00:00:15 --> 00:00:16] 内置的元零件也越来越精细\n[00:00:16 --> 00:00:18] 造价也就越来越贵\n[00:00:18 --> 00:00:20] 万一不小心刮花磕碰到售后的成本\n[00:00:20 --> 00:00:22] 都可以换一台中高端手机了\n[00:00:22 --> 00:00:24] 要是你你会怎么选择呢\n[00:00:24 --> 00:00:26] 要知道大部分时间我们的镜头是用不到的\n[00:00:26 --> 00:00:28] 刮花与磕碰自然避免不了\n[00:00:28 --> 00:00:30] 此时就会有小伙伴说了\n[00:00:30 --> 00:00:32] 蓝宝石镜头膜哪有那么容易刮花\n[00:00:32 --> 00:00:33] 纯纯就是散播谣言\n[00:00:33 --> 00:00:36] 还有一种就是偶尔用手机记录一下生活\n[00:00:36 --> 00:00:38] 对于城墙的质量并没有很大的要求\n[00:00:38 --> 00:00:41]",
+      "analysis": {
+        "overview": "这段转录内容实际上是一期关于手机镜头膜评测的视频，而非标题所述的苏联氢弹科学家故事。UP主从贴膜争议引入，购买了市面上多款镜头膜进行透光率测试和实拍对比，最终给出选购建议。由于转录与标题严重不符，需注意内容主题的偏差。",
+        "key_points": [
+          {
+            "point": "视频引入手机镜头膜是否必要的讨论，呈现正反两方观点。",
+            "evidence": "苹果手机到底有没有必要贴镜头膜……一部分人觉得贴这破玩意买了降低画质……另一部分人则认为……万一不小心刮花磕碰到售后的成本",
+            "timestamp": "00:00:00-00:00:22"
+          },
+          {
+            "point": "UP主解释镜头玻璃的AR涂层及其作用，强调涂层脆弱性。",
+            "evidence": "相机表面的玻璃是涂有AAR涂层的……就是为了让镜头玻璃能有更高的透光率……涂层工艺呢是非常脆弱的",
+            "timestamp": "00:01:05-00:01:17"
+          },
+          {
+            "point": "UP主对多款镜头膜进行透光率测试，区分带AR和不带AR的产品。",
+            "evidence": "其中秋骨兔伞魔第一卫星球卫士图拉斯都是带有做AAR的……贝斯树飞网炮……这几款是没有做AR的",
+            "timestamp": "00:01:27-00:01:43"
+          },
+          {
+            "point": "白天实拍显示各款镜头膜成像影响不大，但夜景和逆光下差异明显。",
+            "evidence": "白天……基本上是没有什么影响的……明显可以看到贝斯树飞网炮都出现了灯光重影……综合下来表现不错的是秋骨兔和图拉斯的AI镜头",
+            "timestamp": "00:02:04-00:02:58"
+          },
+          {
+            "point": "UP主总结选购建议，认为秋骨兔和图拉斯表现较好。",
+            "evidence": "综合下来表现不错的是秋骨兔和图拉斯的AI镜头……价格的话还是秋裤图的有一点优势",
+            "timestamp": "00:02:54-00:03:01"
+          }
+        ],
+        "concepts": [
+          "镜头膜",
+          "AR涂层",
+          "透光率",
+          "鬼影",
+          "炫光"
+        ],
+        "caveats": [
+          "转录内容与视频标题完全不符，标题声称讲述苏联氢弹科学家故事，但转录内容为手机镜头膜评测，需注意实际视频主题可能因转录错误或标题误导。",
+          "转录中品牌名称如“秋骨兔”“贝斯树飞网炮”可能为语音识别错误，无法准确对应真实品牌。",
+          "所有测试结论均来自UP主自述，无第三方客观数据，不可视为科学评测。"
+        ],
+        "chapter_outline": [
+          {
+            "title": "镜头膜争议引入",
+            "timestamp": "00:00:00-00:00:23",
+            "summary": "讨论手机镜头贴膜的必要性，提出正方观点（保护）和反方观点（降画质）。"
+          },
+          {
+            "title": "镜头膜知识与测试准备",
+            "timestamp": "00:01:05-00:01:56",
+            "summary": "介绍AR涂层的作用，购买多款镜头膜并区分是否带AR，进行透光率测试。"
+          },
+          {
+            "title": "实拍对比测试",
+            "timestamp": "00:01:58-00:02:59",
+            "summary": "在白天、逆光、夜景等场景下对比各款镜头膜的成像效果，指出暗光下差异明显。"
+          },
+          {
+            "title": "总结与推荐",
+            "timestamp": "00:02:54-00:03:10",
+            "summary": "综合表现推荐秋骨兔和图拉斯，并提醒观众一键三连。"
+          }
+        ],
+        "questions": [
+          "视频标题与内容为何完全不一致？是否存在转录错误或上传错误？",
+          "UP主推荐的镜头膜品牌具体是什么？转录中的名称是否准确？",
+          "AR涂层对成像的实际影响有多大？本次测试是否具有可重复性？"
+        ]
+      },
+      "note_id": 4417,
+      "elapsed_seconds": 32.78
+    },
+    {
+      "rank": 5,
+      "title": "9年内,让国土面积暴增253%!从小国到大国的逆袭【 历史调研室 100】",
+      "url": "https://www.bilibili.com/video/BV1UXEq6TEH4",
+      "status": "error",
+      "error": "{\n  \"error\": true,\n  \"message\": \"Local ASR is not ready.\",\n  \"message_en\": \"Local ASR is not ready.\",\n  \"message_zh\": \"本地 ASR 尚未就绪。\",\n  \"code\": \"ASR_NOT_READY\",\n  \"category\": \"runtime\",\n  \"retryable\": false,\n  \"user_action_required\": true,\n  \"next_steps_en\": [\n    \"Run `npx -y @xzxzzx/bilibili-mcp@latest setup` outside the MCP call.\",\n    \"Inspect `npx -y @xzxzzx/bilibili-mcp@latest doctor --json` before retrying.\"\n  ],\n  \"next_steps_zh\": [\n    \"请在 MCP 调用之外运行 `npx -y @xzxzzx/bilibili-mcp@latest setup`。\",\n    \"重试前请检查 `npx -y @xzxzzx/bilibili-mcp@latest doctor --json`。\"\n  ],\n  \"next_steps\": [\n    \"Run `npx -y @xzxzzx/bilibili-mcp@latest setup` outside the MCP call.\",\n    \"Inspect `npx -y @xzxzzx/bilibili-mcp@latest doctor --json` before retrying.\"\n  ]\n}",
+      "elapsed_seconds": 15.12
+    }
+  ]
+}

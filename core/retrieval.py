@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from core.llm import LLMError, chat_json
+from core.pdf_ocr import clean_pdf_text
 from core.query_understanding import build_query_plan, normalize_query
 from core.storage import GardenStore
 from core.learning_memory import note_activation
@@ -29,15 +30,212 @@ PLACEHOLDER_MARKERS = (
 )
 
 
+_TEXTBOOK_SUBJECTS: dict[str, tuple[str, ...]] = {
+    "生物化学": ("生物化学", "biochemistry"),
+    "有机化学": ("有机化学", "organic chemistry"),
+    "分子生物学": ("分子生物学", "molecular biology"),
+    "化学": ("化学", "chemistry", "chemical"),
+    "生物学": ("生物学", "biology", "biological"),
+    "生物": ("生物", "biology", "biological"),
+    "力学": ("力学", "mechanics"),
+    "物理": ("物理", "physics", "mechanics"),
+    "微积分": ("微积分", "calculus"),
+    "电路": ("电路", "circuit"),
+}
+_FOUNDATION_TEXTBOOK_SIGNALS: dict[str, tuple[str, ...]] = {
+    "数学": ("数学", "微积分", "代数", "复变", "calculus", "mathematics", "algebra"),
+    "物理": ("物理", "力学", "电路", "电磁", "量子", "physics", "mechanics", "circuit"),
+    "化学": ("化学", "chemistry", "chemical"),
+    "生物": ("生物", "生命科学", "遗传", "biology", "biological", "genetics"),
+    "计算机": ("计算机", "算法", "数据结构", "编程", "computer", "algorithm", "programming"),
+    "哲学": ("哲学", "科学史", "philosophy", "history of science"),
+}
+_DEFINITION_CONCEPT = re.compile(
+    r"(?:什么是|何谓|请解释(?:什么是)?|请说明(?:什么是)?)[‘“\"']?"
+    r"(?P<concept>[^？?，,；;。‘’“”\"']{2,24})"
+)
+_EXPLICIT_TEXTBOOK_SUBJECT = re.compile(
+    r"(?:本地|已经导入的|已导入的|当前|现有)?"
+    r"(?P<subject>生物化学|有机化学|分子生物学|生物学|化学|生物|力学|物理|微积分|电路)"
+    r"(?:的)?(?:教材|课本|讲义)"
+)
+
+
+def _requested_textbook_exists(query: str, notes: list[dict[str, Any]]) -> bool:
+    match = _EXPLICIT_TEXTBOOK_SUBJECT.search(query)
+    if not match:
+        return True
+    signals = _TEXTBOOK_SUBJECTS[str(match.group("subject"))]
+    return any(note.get("kind") in {"textbook", "course"} and any(
+        signal.casefold() in str(note.get("title") or "").casefold() for signal in signals
+    ) for note in notes)
+
+
 def _is_foundational_plan(plan: dict[str, Any]) -> bool:
     return str(plan.get("subject_mode") or "").strip().lower() == "foundational"
 
 
+def _rerank_query(plan: dict[str, Any], fallback: str) -> str:
+    """Keep cross-lingual precision matching in the evidence passage language."""
+    if _is_foundational_plan(plan) and plan.get("strategy") == "bilingual_expand":
+        for variant in plan.get("queries") or []:
+            if variant.get("source") == "bilingual_alias":
+                focused = str(variant.get("text") or "").strip()
+                if focused:
+                    return focused
+    return str(plan.get("resolved") or fallback)
+
+
 def _target_kind_weight(kind: str, source_type: str) -> float:
-    if source_type in {"textbook", "course"}:
-        return 1.25
+    if kind in {"textbook", "course"} or source_type in {"textbook", "course", "pdf"}:
+        return 1.35
     if kind in {"concept", "moc", "bridge", "knowledge", "knowledge_point"}:
-        return 1.12
+        return 1.06
+    return 1.0
+
+
+def _textbook_subject_fields(note: dict[str, Any]) -> set[str]:
+    if note.get("kind") not in {"textbook", "course"} and note.get("source") != "pdf":
+        return set()
+    title = str(note.get("title") or "").casefold()
+    return {
+        field for field, signals in _FOUNDATION_TEXTBOOK_SIGNALS.items()
+        if any(signal.casefold() in title for signal in signals)
+    }
+
+
+def _foundation_domain_weight(note: dict[str, Any], fields: set[str]) -> float:
+    if not fields or (note.get("kind") not in {"textbook", "course"} and note.get("source") != "pdf"):
+        return 1.0
+    textbook_fields = _textbook_subject_fields(note)
+    if textbook_fields & fields:
+        return 1.22
+    return 0.68 if textbook_fields else 0.55
+
+
+def _missing_foundation_evidence(
+    query: str,
+    fields: set[str],
+    notes: list[dict[str, Any]],
+    *,
+    aliases: list[str] | None = None,
+) -> bool:
+    """Reject an absent named concept without hiding rare genuine terminology."""
+    match = _DEFINITION_CONCEPT.search(query)
+    if match is None:
+        if not fields or any(_textbook_subject_fields(note) & fields for note in notes):
+            return False
+        query_terms = set(tokenize(query))
+        return not any(
+            note.get("kind") in {"concept", "knowledge"}
+            and bool(query_terms & set(tokenize(str(note.get("title") or ""))))
+            and relevance_gate(query, str(note.get("title") or ""), str(note.get("content") or ""))["passed"]
+            for note in notes
+        )
+    concept = str(match.group("concept")).strip()
+    if len(concept) < 2:
+        return False
+    grounded_texts = [
+        f"{note.get('title', '')}\n{note.get('content', '')}".casefold()
+        for note in notes
+        if note.get("kind") in {"textbook", "course", "concept", "knowledge"}
+    ]
+    lowered = concept.casefold()
+    if any(lowered in text for text in grounded_texts):
+        return False
+    if any(
+        len(alias.strip()) >= 4 and alias.casefold() in text
+        for alias in aliases or [] for text in grounded_texts
+    ):
+        return False
+
+    # “实数系的完备性” can be grounded by separate textbook passages for
+    # 实数系 and 完备性, even when the complete phrase never occurs verbatim.
+    components = [part for part in lowered.split("的") if len(part) >= 2]
+    if len(components) >= 2 and all(
+        any(component in text for text in grounded_texts) for component in components
+    ):
+        return False
+
+    # OCR may preserve only a rare specialist root: the chemistry textbook
+    # says “手性”, not “手性分子”. Keep that page when the remaining suffix is
+    # generic; do not mistake two unrelated rare terms for a complete concept.
+    if len(lowered) >= 4:
+        specialist_root = lowered[:2]
+        suffix = lowered[2:]
+        rarity_threshold = max(3, len(grounded_texts) // 200)
+        specialist_threshold = max(2, len(grounded_texts) // 1_000)
+        root_count = sum(specialist_root in text for text in grounded_texts)
+        suffix_count = sum(suffix in text for text in grounded_texts)
+        if 0 < root_count <= specialist_threshold and suffix_count > rarity_threshold:
+            return False
+    return True
+
+
+def _channel_consensus_bonus(matches: list[dict[str, Any]]) -> float:
+    """Protect evidence independently confirmed by lexical and semantic search."""
+    bonus = 0.0
+    for source in ("resolved", "bilingual_alias"):
+        lexical = [
+            int(item["rank"]) for item in matches
+            if item.get("source") == source and item.get("channel") == "lexical"
+        ]
+        semantic = [
+            int(item["rank"]) for item in matches
+            if item.get("source") == source and item.get("channel") == "semantic"
+        ]
+        if not lexical or not semantic:
+            continue
+        if source == "bilingual_alias" and min(lexical) <= 5 and min(semantic) <= 5:
+            bonus += 0.018
+        elif source == "bilingual_alias" and min(lexical) <= 2 and min(semantic) <= 10:
+            bonus += 0.009
+        elif source == "resolved" and min(lexical) <= 2 and min(semantic) <= 2:
+            bonus += 0.014
+    return min(0.024, bonus)
+
+
+def _diverse_rerank_candidates(
+    ranked: list[dict[str, Any]], *, limit: int, lexical_slots: int = 4,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep fresh lexical hits visible while their vector index is being built."""
+    selected = list(ranked[:limit])
+    selected_paths = {str(item.get("path")) for item in selected}
+    lexical_leaders = sorted(
+        (item for item in ranked if isinstance(item.get("lexical_rank"), int)),
+        key=lambda item: (int(item["lexical_rank"]), -float(item.get("fusion_score", 0))),
+    )[:lexical_slots]
+    for candidate in lexical_leaders:
+        candidate_path = str(candidate.get("path"))
+        if candidate_path in selected_paths:
+            continue
+        replace_at = next(
+            (index for index in range(len(selected) - 1, -1, -1)
+             if not isinstance(selected[index].get("lexical_rank"), int)),
+            len(selected) - 1,
+        )
+        if replace_at < 0:
+            continue
+        selected_paths.discard(str(selected[replace_at].get("path")))
+        selected[replace_at] = candidate
+        selected_paths.add(candidate_path)
+    remainder = [item for item in ranked if str(item.get("path")) not in selected_paths]
+    return selected, remainder
+
+
+def _textbook_navigation_weight(note: dict[str, Any]) -> float:
+    """Prevent textbook indexes/contents from outranking substantive evidence."""
+    if note.get("kind") not in {"textbook", "course"} and note.get("source") != "pdf":
+        return 1.0
+    opening = re.sub(r"\s+", " ", str(note.get("content") or "")[:220]).strip()
+    if re.match(
+        r"^(?:(?:\d+|[ivxlcdm]+)\s+)?(?:(?:index|contents|table of contents)\b|目录|目\s*录|索引|术语索引)",
+        opening,
+        re.I,
+    ):
+        return 0.32
+    if re.match(r"^[索引]\s", opening) and len(re.findall(r"\s\d{1,3}(?=\s|$)", opening)) >= 5:
+        return 0.32
     return 1.0
 
 
@@ -142,19 +340,20 @@ def _fallback_queries(plan: dict[str, Any], query: str) -> list[str]:
 def _search_notes_lexical(
     store: GardenStore, query: str, *, kinds: set[str] | None = None, limit: int = 5,
     strict_relevance: bool = True,
+    notes: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     query_tokens = tokenize(query)
     if not query_tokens:
         return []
-    notes = store.list_notes(limit=3000)
+    notes = notes if notes is not None else store.list_notes(limit=10_000)
     if kinds:
         notes = [note for note in notes if note["kind"] in kinds]
     query_counts = Counter(query_tokens)
-    scored: list[tuple[float, dict[str, Any]]] = []
+    definition = _DEFINITION_CONCEPT.search(query)
+    concept_tokens = set(tokenize(str(definition.group("concept")))) if definition else set()
+    prepared: list[tuple[dict[str, Any], dict[str, Any], Counter[str], set[str], set[str]]] = []
+    document_frequencies: Counter[str] = Counter()
     for note in notes:
-        relevance = relevance_gate(query, note["title"], note["content"])
-        if strict_relevance and not relevance["passed"]:
-            continue
         doc_tokens = tokenize(note["title"] + " " + note["content"])
         if not doc_tokens:
             continue
@@ -162,8 +361,28 @@ def _search_notes_lexical(
         overlap = set(query_counts) & set(counts)
         if not overlap:
             continue
-        score = sum((1 + math.log1p(counts[token])) * (2 if token in tokenize(note["title"]) else 1) for token in overlap)
-        score /= math.sqrt(max(1, len(doc_tokens)))
+        document_frequencies.update(overlap)
+        relevance = relevance_gate(query, note["title"], note["content"])
+        prepared.append((note, relevance, counts, overlap, set(tokenize(note["title"]))))
+    rare_concept_tokens = {
+        token for token in concept_tokens
+        if len(token) >= 2 and 0 < document_frequencies[token] <= max(3, len(notes) // 200)
+    }
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for note, relevance, counts, overlap, title_tokens in prepared:
+        rare_concept_match = bool(overlap & rare_concept_tokens)
+        if strict_relevance and not relevance["passed"] and not rare_concept_match:
+            continue
+        score = sum(
+            (1 + math.log1p(counts[token]))
+            * (1 + math.log1p(len(notes) / max(1, document_frequencies[token])))
+            * (2 if token in title_tokens else 1)
+            * (1.8 if token in concept_tokens else 1.0)
+            for token in overlap
+        )
+        score /= math.sqrt(max(1, sum(counts.values())))
+        if rare_concept_match:
+            score *= 4.0
         knowledge_value = note_activation(note)
         # Temporal value reorders genuinely relevant hits; it never makes an
         # unrelated note match and never hides a low-activation note completely.
@@ -172,9 +391,11 @@ def _search_notes_lexical(
         item["snippet"] = _snippet(note["content"], list(overlap))
         item["score"] = round(score, 4)
         item["knowledge_value"] = knowledge_value
-        item["relevance_score"] = relevance["score"]
+        item["relevance_score"] = relevance["score"] if relevance["passed"] else 0.66
         item["matched_terms"] = relevance["matched_terms"]
-        item["relevance_reason"] = relevance["reason"]
+        item["relevance_reason"] = (
+            relevance["reason"] if relevance["passed"] else "命中教材中低频且具有区分度的专业概念"
+        )
         item["knowledge_status"] = local_knowledge_status(note)
         scored.append((score, item))
     scored.sort(key=lambda pair: pair[0], reverse=True)
@@ -202,10 +423,18 @@ def search_notes(
     }
     query_budget = min(max_queries, strategy_limit.get(strategy, max(1, max_queries)))
     foundational = _is_foundational_plan(plan)
+    foundation_fields = {str(field) for field in plan.get("foundation_fields", [])}
     if foundational and query_budget < 2:
         query_budget = min(2, max(1, max_queries))
     queries = queries[:query_budget]
     notes = store.list_notes(limit=10_000)
+    if not _requested_textbook_exists(str(plan.get("resolved") or query), notes):
+        return []
+    if foundational and _missing_foundation_evidence(
+        str(plan.get("resolved") or query), foundation_fields, notes,
+        aliases=[str(alias) for alias in plan.get("aliases", [])],
+    ):
+        return []
     note_by_path = {str(note["path"]): note for note in notes if not kinds or note["kind"] in kinds}
     fused: dict[str, dict[str, Any]] = {}
     if semantic_enabled is None:
@@ -219,6 +448,7 @@ def search_notes(
         lexical = _search_notes_lexical(
             store, variant_text, kinds=kinds, limit=candidate_limit,
             strict_relevance=strict_relevance if query_index == 0 else False,
+            notes=notes,
         )
         for rank, hit in enumerate(lexical, 1):
             path = str(hit["path"])
@@ -226,6 +456,10 @@ def search_notes(
             item_kind = str(item.get("kind") or "")
             item_source = str(item.get("source") or "")
             kind_weight = _target_kind_weight(item_kind, item_source) if foundational else 1.0
+            if foundational:
+                source_note = note_by_path.get(path, item)
+                kind_weight *= _textbook_navigation_weight(source_note)
+                kind_weight *= _foundation_domain_weight(source_note, foundation_fields)
             item["fusion_score"] += weight * kind_weight / (60 + rank)
             item["query_matches"].append({"source": source, "channel": "lexical", "rank": rank})
             if "lexical_rank" not in item or rank < item["lexical_rank"]:
@@ -262,6 +496,8 @@ def search_notes(
             source_type = str(note.get("source") or "")
             if foundational:
                 kind_weight = _target_kind_weight(item_kind, source_type)
+                kind_weight *= _textbook_navigation_weight(note)
+                kind_weight *= _foundation_domain_weight(note, foundation_fields)
             else:
                 kind_weight = 1.0
             item["fusion_score"] += 1.15 * weight * kind_weight / (60 + rank)
@@ -281,11 +517,19 @@ def search_notes(
             lexical = _search_notes_lexical(
                 store, fallback_clean, kinds=kinds, limit=candidate_limit,
                 strict_relevance=False,
+                notes=notes,
             )
             for rank, hit in enumerate(lexical, 1):
                 path = str(hit["path"])
                 item = fused.setdefault(path, {**hit, "fusion_score": 0.0, "query_matches": []})
-                item["fusion_score"] += 0.85 / (80 + rank)
+                item_kind = str(item.get("kind") or "")
+                item_source = str(item.get("source") or "")
+                kind_weight = _target_kind_weight(item_kind, item_source) if foundational else 1.0
+                if foundational:
+                    source_note = note_by_path.get(path, item)
+                    kind_weight *= _textbook_navigation_weight(source_note)
+                    kind_weight *= _foundation_domain_weight(source_note, foundation_fields)
+                item["fusion_score"] += 0.85 * kind_weight / (80 + rank)
                 item["query_matches"].append({
                     "source": "fallback", "channel": "lexical", "rank": rank,
                 })
@@ -318,6 +562,9 @@ def search_notes(
                 note_kind = str(note.get("kind") or "")
                 source_type = str(note.get("source") or "")
                 kind_weight = _target_kind_weight(note_kind, source_type) if foundational else 1.0
+                if foundational:
+                    kind_weight *= _textbook_navigation_weight(note)
+                    kind_weight *= _foundation_domain_weight(note, foundation_fields)
                 item["fusion_score"] += 1.0 * kind_weight / (80 + rank)
                 item["query_matches"].append({"source": "fallback", "channel": "semantic", "rank": rank})
                 old_score = float(item.get("semantic_score", -1.0))
@@ -327,16 +574,29 @@ def search_notes(
                     item["semantic_snippet"] = hit["text"]
                     item["snippet"] = hit["text"]
 
-    ranked = sorted(fused.values(), key=lambda item: item["fusion_score"], reverse=True)
     if rerank_enabled is None:
         rerank_enabled = os.getenv("GARDEN_DISABLE_RERANKER", "").strip().lower() not in {"1", "true", "yes"}
+    if foundational:
+        for item in fused.values():
+            if item.get("relevance_reason") == "命中教材中低频且具有区分度的专业概念":
+                # Cross-encoders favor broad question wording and can bury the
+                # only OCR page containing a rare two-character definition.
+                # Keep that auditable lexical evidence visible after RRF.
+                item["specialist_concept_bonus"] = 0.022
+                item["fusion_score"] += item["specialist_concept_bonus"]
+            consensus = _channel_consensus_bonus(item.get("query_matches") or [])
+            if consensus:
+                item["channel_consensus_bonus"] = consensus
+                item["fusion_score"] += consensus
+    ranked = sorted(fused.values(), key=lambda item: item["fusion_score"], reverse=True)
     if rerank_enabled:
         try:
             from core.reranker import rerank_candidates
 
             configured = int(os.getenv("GARDEN_RERANK_CANDIDATES", "16"))
             rerank_limit = min(len(ranked), max(limit, max(4, configured)))
-            ranked = rerank_candidates(str(plan.get("resolved") or query), ranked[:rerank_limit]) + ranked[rerank_limit:]
+            candidates, remainder = _diverse_rerank_candidates(ranked, limit=rerank_limit)
+            ranked = rerank_candidates(_rerank_query(plan, query), candidates) + remainder
         except Exception:
             # Reranking is an optional precision layer. Retrieval remains
             # available on machines where its local model is not installed.
@@ -401,7 +661,7 @@ def ingest_pdf_directory(pdf_dir: str | Path, store: GardenStore, *, max_pages: 
             for page_index, page in enumerate(reader.pages):
                 if max_pages is not None and pages >= max_pages:
                     break
-                text = (page.extract_text() or "").strip()
+                text = clean_pdf_text(page.extract_text() or "")
                 if len(text) < 30:
                     continue
                 pages += 1

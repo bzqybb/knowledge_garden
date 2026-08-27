@@ -45,15 +45,19 @@ class ContextBuilder:
                 role=role,
                 content=content,
                 capability=str(item.get("capability") or active_capability),
+                evidence_layer=(
+                    str(item.get("evidence_layer") or "").strip()[:64] or None
+                ),
             ))
 
         enabled_set = set(self.store.setting("enabled_tools", [
-            "local_wiki", "obsidian", "wikipedia", "academic_search", "understanding_model",
+            "local_wiki", "obsidian", "wikipedia", "academic_search", "public_web",
+            "understanding_model",
         ]))
         system_allowed = {"local_wiki", "obsidian"}
         network_disabled = os.getenv("GARDEN_DISABLE_NETWORK", "").strip().lower() in {"1", "true", "yes"}
         if not network_disabled:
-            system_allowed.update({"wikipedia", "academic_search"})
+            system_allowed.update({"wikipedia", "academic_search", "public_web"})
         if llm_config().enabled:
             system_allowed.add("understanding_model")
         # Saving the TraceMemo token in the Garden UI is the user's explicit

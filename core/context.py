@@ -22,6 +22,7 @@ class ChatMessage(FrozenContextModel):
     role: Literal["user", "assistant"]
     content: str = Field(min_length=1, max_length=100_000)
     capability: str | None = Field(default=None, max_length=64)
+    evidence_layer: str | None = Field(default=None, max_length=64)
     created_at: datetime = Field(default_factory=utc_now_datetime)
 
     @field_validator("message_id", "content")

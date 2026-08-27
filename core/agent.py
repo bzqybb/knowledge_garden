@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -211,6 +212,42 @@ INTEREST_SEARCH_TERMS = {
 }
 
 
+def _frontier_profile(
+    store: GardenStore, interests: list[str], knowledge_notes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    explicit_text = str(store.setting("frontier_focus", "") or "").strip()
+    explicit = [
+        item.strip() for item in re.split(r"[，,、;；\n]+", explicit_text) if item.strip()
+    ][:8]
+    ignored_tags = {
+        "教材", "课本", "概念", "知识", "前沿", "待阅读", "每日推荐", "用户确认",
+        "视频解析", "字幕已解析", "B站", "raw", "source",
+    }
+    tag_counts: dict[str, int] = {}
+    for note in knowledge_notes[:100]:
+        for raw_tag in note.get("tags") or []:
+            tag = str(raw_tag).strip()
+            if len(tag) < 2 or tag in ignored_tags:
+                continue
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+    recent_topics = [
+        tag for tag, _ in sorted(tag_counts.items(), key=lambda item: (-item[1], item[0]))[:4]
+        if tag not in explicit and tag not in interests
+    ]
+    priorities = list(dict.fromkeys([*explicit, *interests, *recent_topics]))
+    return {
+        "explicit": explicit,
+        "interests": interests,
+        "recent_topics": recent_topics,
+        "priorities": priorities,
+        "basis": [
+            *(["你主动填写的专业/当前重点：" + "、".join(explicit)] if explicit else []),
+            *(["兴趣画像：" + "、".join(interests)] if interests else []),
+            *(["近期知识树主题：" + "、".join(recent_topics)] if recent_topics else []),
+        ],
+    }
+
+
 def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
     """Create a vertical-domain frontier feed with an interactive reading guide."""
     interests = [str(item).strip() for item in (store.setting("interests", []) or []) if str(item).strip()]
@@ -221,17 +258,22 @@ def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
         note for note in store.list_notes(limit=500)
         if note["kind"] in {"concept", "knowledge", "course", "moc"}
     ]
+    frontier_profile = _frontier_profile(store, interests, knowledge_notes)
+    priorities = frontier_profile["priorities"]
     knowledge_signature = "|".join(f"{note['id']}:{note['updated_at']}" for note in knowledge_notes[:80])
-    profile_signature = hashlib.sha256((today + level + "|".join(interests) + knowledge_signature).encode("utf-8")).hexdigest()
+    profile_signature = hashlib.sha256(
+        (today + level + "|".join(priorities) + knowledge_signature).encode("utf-8")
+    ).hexdigest()
     cached = store.setting(cache_key, {}) or {}
     # Never pin an empty transient failure for the whole day. Successful
     # recommendations may use the daily profile cache normally.
     if not force and cached.get("signature") == profile_signature and cached.get("items"):
         return cached
-    if not interests:
+    if not priorities:
         result = {
             "signature": profile_signature, "date": today, "level": level, "interests": [], "items": [],
-            "message": "先在学习画像里选择兴趣，园丁才知道今天该替你巡视哪些方向。",
+            "profile": frontier_profile,
+            "message": "先在学习画像里填写专业/当前重点或兴趣，园丁才知道今天该巡视哪些方向。",
         }
         store.set_setting(cache_key, result)
         return result
@@ -239,18 +281,18 @@ def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
     if force:
         refresh_index += 1
         store.set_setting("daily_refresh_index", refresh_index)
-    offset = (date.today().toordinal() + refresh_index) % len(interests)
-    chosen = [interests[(offset + index) % len(interests)] for index in range(min(2, len(interests)))]
+    offset = (date.today().toordinal() + refresh_index) % len(priorities)
+    chosen = [priorities[(offset + index) % len(priorities)] for index in range(min(2, len(priorities)))]
     articles = []
     retrieval_reports: list[dict[str, Any]] = []
     retrieval_errors: list[str] = []
-    for interest in chosen:
-        query = INTEREST_SEARCH_TERMS.get(interest, f"{interest} recent research review")
+    def retrieve_direction(interest: str) -> tuple[str, str, list[dict[str, Any]], dict[str, Any]]:
+        query = INTEREST_SEARCH_TERMS.get(interest, f"{interest} recent advances research")
         diagnostics: dict[str, Any] = {}
         try:
             found = search_academic_articles(
                 query, limit=6, from_publication_date=(date.today() - timedelta(days=45)).isoformat(),
-                diagnostics=diagnostics,
+                diagnostics=diagnostics, timeout=7, attempts_per_provider=1,
             )
         except Exception as exc:
             found = []
@@ -258,6 +300,14 @@ def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
                 diagnostics["errors"] = [f"{exc.__class__.__name__}：{exc}"]
         diagnostics["interest"] = interest
         diagnostics["query"] = query
+        return interest, query, found, diagnostics
+
+    # Two independent subject searches run together so a degraded provider
+    # cannot make the user wait through both directions sequentially.
+    with ThreadPoolExecutor(max_workers=min(2, len(chosen))) as executor:
+        direction_results = list(executor.map(retrieve_direction, chosen))
+
+    for interest, query, found, diagnostics in direction_results:
         retrieval_reports.append(diagnostics)
         retrieval_errors.extend(str(item) for item in diagnostics.get("errors", []) if str(item).strip())
         added_for_interest = 0
@@ -289,7 +339,12 @@ def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
             if meaningful:
                 connections.append({"id": note["id"], "title": note["title"], "terms": meaningful[:3]})
         connections = connections[:3]
-        field_score = 0.9 if article["interest"] in interests else 0.5
+        if article["interest"] in frontier_profile["explicit"]:
+            field_score = 1.0
+        elif article["interest"] in interests:
+            field_score = 0.9
+        else:
+            field_score = 0.76
         connection_score = min(1.0, 0.35 * len(connections))
         authority_score = min(0.95, 0.62 + min(int(article.get("cited_by_count") or 0), 100) / 500)
         freshness_score = 1.0 if int(article.get("year") or 0) >= date.today().year else 0.72
@@ -339,6 +394,7 @@ def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
         notice = "；".join(dict.fromkeys(retrieval_errors)) or "在线来源没有返回符合当前兴趣和时间范围的文章。"
     result = {
         "signature": profile_signature, "date": today, "level": level, "interests": interests,
+        "profile": frontier_profile, "chosen_directions": chosen,
         "items": items,
         "message": "" if items else f"今天没有生成推荐：{notice}",
         "notice": notice,

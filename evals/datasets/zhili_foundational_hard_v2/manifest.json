@@ -1,0 +1,15 @@
+{
+  "suite": "zhili_foundational_hard_v2",
+  "revision": 2,
+  "counts": {
+    "development": 30,
+    "transfer_validation": 20,
+    "author_visible_challenge": 10
+  },
+  "policy": {
+    "development": "可用于归因和修改通用规则。",
+    "transfer_validation": "冻结后运行；不得根据答案修改规则。",
+    "author_visible_challenge": "仅作作者可见迁移快照，不声称严格盲测。"
+  },
+  "design_note": "10 个开发推理结构，每组 3 个异质变体与 2 个冻结迁移；另含 10 个构造、肯定推导、计算和纠错混合的新结构挑战。"
+}

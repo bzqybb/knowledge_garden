@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from core.config import TEMP_DIR
 from core.context_builder import ContextBuilder
 from core.gardener_graph import run_gardener_graph
 from core.learning_memory import LearningMemoryService
@@ -85,7 +86,16 @@ def run_retrieval_case(store: GardenStore, case: dict[str, Any], *, limit: int =
     return {
         "id": case["id"],
         "category": case.get("category", "unspecified"),
+        "discipline": case.get("discipline", "未分类"),
+        "difficulty": case.get("difficulty", "未标注"),
+        "reasoning_type": case.get("reasoning_type", ""),
+        "section": case.get("section", ""),
+        "coverage_status": case.get("coverage_status", ""),
+        "requires_online_completion": bool(case.get("requires_online_completion", False)),
+        "evidence_terms": case.get("evidence_terms", []),
         "question": case["question"],
+        "reference": str(case.get("reference", "")),
+        "should_abstain": should_abstain,
         "retrieved_titles": titles,
         "retrieved_context_ids": paths,
         "reference_titles": reference_titles,
@@ -104,7 +114,9 @@ def run_retrieval_case(store: GardenStore, case: dict[str, Any], *, limit: int =
 
 @contextmanager
 def temporary_store(source_db: str | Path) -> Iterator[GardenStore]:
-    with tempfile.TemporaryDirectory(prefix="knowledge-garden-eval-") as folder:
+    with tempfile.TemporaryDirectory(
+        prefix="knowledge-garden-eval-", dir=TEMP_DIR,
+    ) as folder:
         target = Path(folder) / "garden-eval.db"
         shutil.copy2(Path(source_db), target)
         yield GardenStore(target)
@@ -129,10 +141,18 @@ def run_graph_case(store: GardenStore, case: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": case["id"],
         "category": case.get("category", "unspecified"),
+        "discipline": case.get("discipline", "未分类"),
+        "difficulty": case.get("difficulty", "未标注"),
+        "reasoning_type": case.get("reasoning_type", ""),
+        "section": case.get("section", ""),
+        "coverage_status": case.get("coverage_status", ""),
+        "requires_online_completion": bool(case.get("requires_online_completion", False)),
+        "evidence_terms": case.get("evidence_terms", []),
         "question": question,
         "reference": str(case.get("reference", "")),
         "should_abstain": bool(case.get("should_abstain", False)),
         "answer": result.get("answer", ""),
+        "reasoning": result.get("reasoning", {}),
         "evidence_layer": result.get("evidence_layer", "none"),
         "retrieved_contexts": evaluation.get("retrieved_contexts", []),
         "retrieved_context_ids": evaluation.get("retrieved_context_ids", []),

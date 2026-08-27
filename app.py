@@ -14,15 +14,18 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from core.agent import answer_from_wiki, briefing, daily_digest, hint_for_task, patrol_vault, save_agent_insight, update_agents_manifest
+from core.bilibili_mcp import read_video as read_bilibili_video, runtime_status as bilibili_mcp_status
 from core.config import DATA_DIR, WEB_DIR, llm_config
 from core.compiler import ingest_raw, validate_links
 from core.engine import add_interest, analyze_frontier, article_preview_metadata, evaluate_review, weekly_report
 from core.inspiration import explore_inspiration, save_inspiration_seed
-from core.feeds import refresh_feeds
+from core.feeds import describe_feed, list_followed_sources, list_frontier_material, refresh_feeds
 from core.llm import LLMError, chat, prewarm_understanding_model
 from core.learning_memory import LearningMemoryService
 from core.mindmap import build_mindmap
 from core.obsidian import sync_vault, write_raw_material
+from core.paper_reader import deep_read_paper
+from core.pdf_ocr import start_background_textbook_ocr, textbook_ocr_status, windows_ocr_available
 from core.retrieval import build_semantic_links, ingest_pdf_directory, rebuild_domain_map, search_notes
 from core.storage import GardenStore
 from core.taxonomy import classify_unmounted_concepts, rebuild_concept_hierarchy
@@ -181,6 +184,42 @@ def understanding_warmup() -> None:
         print(f"[Knowledge Garden] 问题理解器预热已跳过：{exc.__class__.__name__}")
 
 
+def model_warmups(stop_event: threading.Event) -> None:
+    """Warm remote model clients sequentially after the UI can already load."""
+    if stop_event.wait(3):
+        return
+    refresh_llm_health()
+    if not stop_event.is_set():
+        understanding_warmup()
+
+
+def retrieval_warmup(stop_event: threading.Event) -> None:
+    """Load optional local retrieval models after the HTTP server is available."""
+    if os.getenv("GARDEN_PREWARM_RETRIEVAL", "1").strip().lower() in {"0", "false", "no"}:
+        return
+    # Importing PyTorch/SentenceTransformers is CPU-heavy on Windows.  Give the
+    # browser enough time to fetch the shell and initial API state first.
+    if stop_event.wait(8):
+        return
+    try:
+        if os.getenv("GARDEN_DISABLE_SEMANTIC", "").strip().lower() not in {"1", "true", "yes"}:
+            from core.semantic_index import _load as load_semantic_index
+
+            if load_semantic_index() is None:
+                print("[Knowledge Garden] 本地语义索引尚未建立，已跳过检索预热。")
+                return
+        if stop_event.is_set():
+            return
+        if os.getenv("GARDEN_DISABLE_RERANKER", "").strip().lower() not in {"1", "true", "yes"}:
+            from core.reranker import _load_model as load_reranker
+
+            load_reranker()
+        print("[Knowledge Garden] 语义检索与精排模型已在后台预热。")
+    except Exception as exc:
+        # Retrieval remains optional on machines without downloaded models.
+        print(f"[Knowledge Garden] 本地检索预热已跳过：{exc.__class__.__name__}")
+
+
 class GardenHandler(BaseHTTPRequestHandler):
     server_version = "KnowledgeGarden/1.0"
 
@@ -239,14 +278,16 @@ class GardenHandler(BaseHTTPRequestHandler):
                         "vault_path": STORE.setting("vault_path", ""),
                         "learning_level": STORE.setting("learning_level", "本科入门"),
                         "interests": STORE.setting("interests", []),
+                        "frontier_focus": STORE.setting("frontier_focus", ""),
                         "textbook_directory": STORE.setting("textbook_directory", str(DATA_DIR / "textbook_kb")),
+                        "textbook_ocr": textbook_ocr_status(STORE),
                         "classification_queue": list((STORE.setting("classification_queue_v1", {}) or {}).values()),
                         "wechat": wechat_connection_status(),
                         **model_health,
                     },
                     "tasks": STORE.list_tasks(limit=8),
                     "cards": STORE.list_cards(limit=5),
-                    "feeds": STORE.list_feeds(),
+                    "feeds": list_followed_sources(STORE),
                     "report": weekly_report(STORE),
                     "agent": briefing(STORE),
                 })
@@ -256,7 +297,11 @@ class GardenHandler(BaseHTTPRequestHandler):
                 self._json(build_mindmap(STORE))
             elif parsed.path == "/api/notes":
                 params = parse_qs(parsed.query)
-                self._json({"notes": STORE.list_notes(params.get("kind", [None])[0], 200)})
+                kind = params.get("kind", [None])[0]
+                notes = list_frontier_material(STORE, 200) if kind == "frontier" else STORE.list_notes(kind, 200)
+                self._json({"notes": notes})
+            elif parsed.path == "/api/textbooks/ocr/status":
+                self._json({"ok": True, "status": textbook_ocr_status(STORE)})
             elif parsed.path == "/api/cards":
                 self._json({"cards": STORE.list_cards(50)})
             elif parsed.path == "/api/tasks":
@@ -266,6 +311,8 @@ class GardenHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/daily":
                 params = parse_qs(parsed.query)
                 self._json(daily_digest(STORE, force=params.get("refresh", ["0"])[0] == "1"))
+            elif parsed.path == "/api/bilibili/status":
+                self._json({"ok": True, "status": bilibili_mcp_status()})
             elif parsed.path == "/api/memory":
                 self._json(MEMORY.overview())
             elif parsed.path == "/api/wechat/status":
@@ -302,7 +349,7 @@ class GardenHandler(BaseHTTPRequestHandler):
         try:
             body = self._body()
             if path == "/api/settings":
-                for key in ("vault_path", "learning_level", "interests", "textbook_directory"):
+                for key in ("vault_path", "learning_level", "interests", "frontier_focus", "textbook_directory"):
                     if key in body:
                         STORE.set_setting(key, body[key])
                 self._json({"ok": True})
@@ -448,7 +495,16 @@ class GardenHandler(BaseHTTPRequestHandler):
             elif path == "/api/textbooks/import":
                 directory = body.get("directory") or STORE.setting("textbook_directory", "") or str(DATA_DIR / "textbook_kb")
                 max_pages = body.get("max_pages")
-                self._json({"ok": True, "result": ingest_pdf_directory(directory, STORE, max_pages=max_pages)})
+                result = ingest_pdf_directory(directory, STORE, max_pages=max_pages)
+                if body.get("auto_ocr", True) and windows_ocr_available():
+                    selected = body.get("ocr_books") or []
+                    includes = tuple(str(item).strip() for item in selected if str(item).strip())
+                    result["ocr"] = start_background_textbook_ocr(STORE, directory, includes=includes)
+                self._json({"ok": True, "result": result})
+            elif path == "/api/textbooks/ocr/start":
+                directory = body.get("directory") or STORE.setting("textbook_directory", "") or str(DATA_DIR / "textbook_kb")
+                includes = tuple(str(item).strip() for item in body.get("books", []) if str(item).strip())
+                self._json({"ok": True, "status": start_background_textbook_ocr(STORE, directory, includes=includes)})
             elif path == "/api/links/rebuild":
                 semantic = build_semantic_links(STORE)
                 classification = classify_unmounted_concepts(STORE)
@@ -530,9 +586,52 @@ class GardenHandler(BaseHTTPRequestHandler):
                 abstract = str(body.get("abstract", "")).strip()
                 url = str(body.get("url", "")).strip()
                 interest = str(body.get("interest", "兴趣推荐")).strip()
+                deep_read = body.get("deep_read") if isinstance(body.get("deep_read"), dict) else {}
+                analysis = deep_read.get("analysis") if isinstance(deep_read.get("analysis"), dict) else {}
+                deep_sections: list[str] = []
+                if analysis:
+                    findings = analysis.get("findings") if isinstance(analysis.get("findings"), list) else []
+                    finding_lines = [
+                        f"- {item.get('claim')}" + (f"\n  - 原文证据：{item.get('evidence')}" if item.get("evidence") else "")
+                        for item in findings if isinstance(item, dict) and item.get("claim")
+                    ]
+                    connections = (
+                        analysis.get("local_connections")
+                        if isinstance(analysis.get("local_connections"), list) else []
+                    )
+                    connection_lines = []
+                    for item in connections:
+                        if not isinstance(item, dict) or not item.get("title"):
+                            continue
+                        line = f"- 《{item.get('title')}》：{item.get('bridge') or ''}"
+                        if item.get("path"):
+                            line += f"\n  - 本地来源：{item.get('path')}"
+                        if item.get("mastery"):
+                            line += (
+                                f"\n  - 个性化证据：{item['mastery'].get('concept') or ''} · "
+                                f"{item['mastery'].get('stage') or ''}（复习/作答记录）"
+                            )
+                        else:
+                            line += "\n  - 边界：仅本地资料命中，不代表用户已经掌握。"
+                        connection_lines.append(line)
+                    deep_sections = [
+                        f"## 深读范围\n{deep_read.get('scope_label') or deep_read.get('scope') or '未知'}：{deep_read.get('source_note') or ''}",
+                        f"## 研究问题\n{analysis.get('problem') or ''}",
+                        f"## 创新点\n{analysis.get('novelty') or ''}",
+                        f"## 方法\n{analysis.get('method') or ''}",
+                        "## 核心发现与证据\n" + ("\n".join(finding_lines) or "当前没有通过逐字证据校验的核心发现。"),
+                        "## 与本地知识的连接\n" + (
+                            "\n".join(connection_lines)
+                            or str(analysis.get("local_connection_note") or "没有足够强的本地连接，未强行关联教材。")
+                        ),
+                        "## 局限\n" + "\n".join(f"- {item}" for item in (analysis.get("limitations") or [])),
+                    ]
+                material = abstract or "园丁发现了这条与你学习画像相关的资料，等待进一步阅读。"
+                if deep_sections:
+                    material += "\n\n" + "\n\n".join(deep_sections)
                 raw_path = write_raw_material(
                     vault, title,
-                    (abstract or "园丁发现了这条与你学习画像相关的资料，等待进一步阅读。") + f"\n\n原始链接：{url}",
+                    material + f"\n\n原始链接：{url}",
                     url, [interest, "每日推荐", "待阅读"],
                 )
                 patrol = patrol_vault(vault, STORE)
@@ -548,6 +647,12 @@ class GardenHandler(BaseHTTPRequestHandler):
                     STORE.set_setting("frontier_read_urls", read_urls[-500:])
                     STORE.add_activity("frontier_read", str(body.get("title", "前沿文章"))[:100], 2)
                 self._json({"ok": True, "read": True})
+            elif path == "/api/daily/deep-read":
+                article = body.get("article") if isinstance(body.get("article"), dict) else body
+                self._json({
+                    "ok": True,
+                    "result": deep_read_paper(STORE, article, force=bool(body.get("force"))),
+                })
             elif path == "/api/interest":
                 tags = body.get("tags", [])
                 if isinstance(tags, str):
@@ -602,10 +707,25 @@ class GardenHandler(BaseHTTPRequestHandler):
                 )
                 self._json({"ok": True, "result": result, "stats": STORE.stats()})
             elif path == "/api/feeds":
-                feed_id = STORE.add_feed(str(body.get("name", "关注源")).strip(), str(body.get("url", "")).strip())
-                self._json({"ok": True, "id": feed_id, "feeds": STORE.list_feeds()})
+                name = str(body.get("name", "")).strip()
+                if not name:
+                    raise ValueError("请填写要追踪的博主或订阅源名称")
+                source = describe_feed(str(body.get("url", "")).strip())
+                feed_id = STORE.add_feed(name, str(source["url"]))
+                self._json({
+                    "ok": True, "id": feed_id, "source": source, "feeds": list_followed_sources(STORE),
+                })
             elif path == "/api/feeds/refresh":
                 result = refresh_feeds(STORE)
+                result["sync"] = sync_configured_vault()
+                self._json({"ok": True, "result": result})
+            elif path == "/api/bilibili/video/read":
+                result = read_bilibili_video(
+                    STORE,
+                    str(body.get("url") or body.get("bvid") or ""),
+                    allow_asr=bool(body.get("allow_asr")),
+                    page=int(body.get("page") or 1),
+                )
                 result["sync"] = sync_configured_vault()
                 self._json({"ok": True, "result": result})
             else:
@@ -633,10 +753,21 @@ def main() -> None:
     parser.add_argument("--host", default=os.getenv("GARDEN_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("GARDEN_PORT", "8765")))
     args = parser.parse_args()
-    health = refresh_llm_health()
-    print(f"[Knowledge Garden] {health['llm_message']}")
     server = GardenHTTPServer((args.host, args.port), GardenHandler)
+    # A provider connection check can take tens of seconds when the network or
+    # upstream model is slow.  Binding the local server must not wait for that
+    # remote round trip: the UI can render the existing "checking" state and
+    # pick up the final health status through its normal polling endpoint.
+    health = llm_health()
+    print(f"[Knowledge Garden] {health['llm_message']}")
     stop_event = threading.Event()
+    model_warm = threading.Thread(
+        target=model_warmups,
+        args=(stop_event,),
+        daemon=True,
+        name="model-warmups",
+    )
+    model_warm.start()
     interval = int(os.getenv("GARDEN_FEED_INTERVAL_MINUTES", "60"))
     patrol = threading.Thread(target=feed_patrol, args=(stop_event, interval), daemon=True, name="feed-patrol")
     patrol.start()
@@ -651,12 +782,13 @@ def main() -> None:
         name="memory-patrol",
     )
     memory_watch.start()
-    understanding_warm = threading.Thread(
-        target=understanding_warmup,
+    retrieval_warm = threading.Thread(
+        target=retrieval_warmup,
+        args=(stop_event,),
         daemon=True,
-        name="understanding-warmup",
+        name="retrieval-warmup",
     )
-    understanding_warm.start()
+    retrieval_warm.start()
     print(f"\n[Knowledge Garden] 知识花园已启动：http://{args.host}:{args.port}")
     print("按 Ctrl+C 停止。API Key 仅在进程内存中解密使用。\n")
     try:
