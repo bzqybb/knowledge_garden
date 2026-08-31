@@ -1,6 +1,6 @@
 [package]
 name = "knowledge-garden-desktop"
-version = "0.2.1"
+version = "0.2.2"
 description = "Local connector and auto-updating desktop companion for Knowledge Garden"
 authors = ["Knowledge Garden"]
 edition = "2021"

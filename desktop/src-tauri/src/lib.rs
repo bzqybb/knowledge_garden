@@ -1,9 +1,10 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::{Manager, RunEvent, State};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
@@ -137,7 +138,20 @@ fn tracememo_executable(resource_dir: &Path) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+fn tracememo_api_available() -> bool {
+    let Ok(address) = "127.0.0.1:6131".parse::<SocketAddr>() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&address, Duration::from_millis(400)).is_ok()
+}
+
 fn start_tracememo(resource_dir: &Path, data_dir: &Path) -> Option<Child> {
+    // TraceMemo exposes one machine-local API on port 6131. Reuse an existing
+    // healthy instance instead of opening a second Electron process, which
+    // otherwise fails its API startup and competes for the same disk cache.
+    if tracememo_api_available() {
+        return None;
+    }
     let mut executable = tracememo_executable(resource_dir);
     if executable.is_none() {
         let installers = [

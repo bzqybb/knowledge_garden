@@ -15,19 +15,22 @@ async function waitForGarden(attempt = 0) {
     const response = await fetch(`${localGarden}api/auth/status`, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const status = await response.json();
-    if (status.desktop_instance !== desktopInstanceId) {
+    if (status.desktop_instance && status.desktop_instance !== desktopInstanceId) {
       throw new Error("检测到的不是本次桌面伴侣启动的知识服务");
+    }
+    if (!("required" in status) || !("beta_required" in status)) {
+      throw new Error("本地服务状态响应不完整");
     }
     $("#server-state").textContent = "本地园丁已就绪";
     $("#open-garden").disabled = false;
     return;
-  } catch (_) {
+  } catch (error) {
     if (attempt < 45) {
       $("#server-state").textContent = "正在启动本地园丁…";
     } else if (attempt < gardenStartupTimeoutSeconds) {
       $("#server-state").textContent = "首次启动正在解压并初始化，通常需要 1–3 分钟，请稍候…";
     } else {
-      $("#server-state").textContent = "本地园丁启动超时，请重新打开软件；诊断日志：D:\\KnowledgeGarden\\data\\logs\\sidecar.log";
+      $("#server-state").textContent = `本地园丁启动超时：${error?.message || error}；诊断日志：D:\\KnowledgeGarden\\data\\logs\\sidecar.log`;
     }
     if (attempt < gardenStartupTimeoutSeconds) {
       setTimeout(() => waitForGarden(attempt + 1), 1000);

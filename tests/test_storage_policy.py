@@ -59,6 +59,15 @@ class StoragePolicyTests(unittest.TestCase):
         self.assertIn('os.getenv("GARDEN_DESKTOP_PARENT_PID"', app_source)
         self.assertIn("os._exit(0)", app_source)
 
+    def test_desktop_reuses_an_existing_tracememo_api(self):
+        rust = (ROOT / "desktop" / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+        availability_check = rust.index("if tracememo_api_available()")
+        process_spawn = rust.index("let mut command = Command::new(executable)")
+        self.assertLess(availability_check, process_spawn)
+        self.assertIn('"127.0.0.1:6131"', rust)
+        self.assertIn("TcpStream::connect_timeout", rust)
+        self.assertIn("return None", rust[availability_check:process_spawn])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -534,9 +534,33 @@ class GardenHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         size = installer.stat().st_size
-        self.send_response(HTTPStatus.OK)
+        start, end = 0, size - 1
+        range_header = str(self.headers.get("Range") or "").strip()
+        if range_header:
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+            if not match or (not match.group(1) and not match.group(2)):
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            if match.group(1):
+                start = int(match.group(1))
+                end = min(int(match.group(2) or size - 1), size - 1)
+            else:
+                suffix = min(int(match.group(2)), size)
+                start, end = size - suffix, size - 1
+            if start >= size or end < start:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+        partial = start != 0 or end != size - 1
+        self.send_response(HTTPStatus.PARTIAL_CONTENT if partial else HTTPStatus.OK)
         self.send_header("Content-Type", "application/vnd.microsoft.portable-executable")
-        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Length", str(end - start + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        if partial:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.send_header(
             "Content-Disposition",
             'attachment; filename="KnowledgeGarden-Public-Beta-x64-setup.exe"',
@@ -547,8 +571,11 @@ class GardenHandler(BaseHTTPRequestHandler):
         if not include_body:
             return
         with installer.open("rb") as source:
-            while chunk := source.read(1024 * 1024):
+            source.seek(start)
+            remaining = end - start + 1
+            while remaining > 0 and (chunk := source.read(min(1024 * 1024, remaining))):
                 self.wfile.write(chunk)
+                remaining -= len(chunk)
 
     def do_HEAD(self) -> None:
         if urlparse(self.path).path == "/downloads/windows":
