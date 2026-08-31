@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>致知花园桌面伴侣</title>
+  <script type="module" src="/src/main.js"></script>
+</head>
+<body>
+  <main class="desktop-shell">
+    <header>
+      <div><span>ZHIZHI GARDEN COMPANION</span><h1>致知花园桌面伴侣</h1></div>
+      <div class="header-actions"><small id="version-label">正在检查版本…</small><button id="check-update" type="button">检查更新</button></div>
+    </header>
+    <section id="setup-panel" class="setup-panel">
+      <article><b id="server-state">正在启动本地园丁…</b><p>桌面伴侣会自动选择空闲的本地端口；若启动失败，诊断日志保存在 D:\KnowledgeGarden\data\logs\sidecar.log。</p></article>
+      <article><b>① 连接 Obsidian</b><p>进入花园设置，选择你的 Vault 文件夹。只索引你主动指定的目录。</p></article>
+      <article><b>② 连接微信</b><p>安装包已内置并自动启动 TraceMemo，无需另外下载。首次使用只需按引导授权微信数据，并在 API Center 创建只读 Token；伴侣会验证端口、Token 和数据库状态。</p></article>
+      <article><b>③ 登录公测账号</b><p>打开花园后登录或创建公测账号，即可使用项目方提供的 GLM 模型额度；不需要填写、复制或接触任何 API Key。</p></article>
+      <article><b>④ 选择云端共享边界</b><p>本地数据库、微信和 Obsidian 不会被整库上传。只有你主动用于回答的提问与材料片段会发送到公测模型代理；是否贡献脱敏评测样例由你单独授权。</p></article>
+      <button id="open-garden" type="button" disabled>打开本地花园</button>
+    </section>
+    <section id="update-panel" class="update-panel" hidden><b id="update-title"></b><p id="update-notes"></p><button id="install-update" type="button">下载并安装</button><button id="dismiss-update" class="ghost" type="button">稍后</button></section>
+    <iframe id="garden-frame" title="致知花园" hidden></iframe>
+  </main>
+</body>
+</html>

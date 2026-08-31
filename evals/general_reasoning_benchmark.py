@@ -73,7 +73,11 @@ def run_cases(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with temporary_store(DB_PATH) as store:
         for index, case in enumerate(cases, 1):
-            row = run_graph_case(store, case)
+            # This benchmark measures the product's real ordinary-Q&A path.
+            # Retrieval benchmarks may force the full graph via the adapter's
+            # default, but doing so here would hide regressions in the GLM-5.2
+            # quality-floor routing that users actually experience.
+            row = run_graph_case(store, case, force_full_graph=False)
             reasoning = row.get("reasoning") if isinstance(row.get("reasoning"), dict) else {}
             profile = classify_reasoning_task(str(case["question"]))
             local_review = review_reasoning_answer(profile, str(row.get("answer") or ""))

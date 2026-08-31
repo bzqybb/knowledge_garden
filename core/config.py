@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
+DATA_DIR = Path(os.getenv("GARDEN_DATA_DIR", str(ROOT / "data"))).expanduser().resolve()
 RUNTIME_DIR = DATA_DIR / "runtime"
 CACHE_DIR = DATA_DIR / "cache"
 TEMP_DIR = DATA_DIR / "tmp"
@@ -16,6 +16,7 @@ DB_PATH = RUNTIME_DIR / "garden.db"
 SAVED_API_KEY_PATH = RUNTIME_DIR / "garden-api-key.dpapi"
 SAVED_GLM_GENERATOR_API_KEY_PATH = RUNTIME_DIR / "glm-generator-api-key.dpapi"
 SAVED_UNDERSTANDING_API_KEY_PATH = RUNTIME_DIR / "understanding-api-key.dpapi"
+SAVED_BETA_SESSION_PATH = RUNTIME_DIR / "public-beta-session.dpapi"
 WEB_DIR = ROOT / "web"
 
 
@@ -72,8 +73,37 @@ class LLMConfig:
         return bool(self.api_key)
 
 
+def closed_loop_generation_timeout_seconds() -> float:
+    """Wall-clock budget for one self-contained proof/derivation generation."""
+    raw = os.getenv("GARDEN_CLOSED_LOOP_TIMEOUT_SECONDS", "120").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 120.0
+    # Deliberative models behind shared gateways can legitimately need several
+    # minutes for a complete proof or causal analysis. Keep a hard upper bound,
+    # but do not force a quality-oriented request to fall back after 180s.
+    return min(300.0, max(30.0, value))
+
+
 def llm_config() -> LLMConfig:
     """Return the primary teaching model configuration."""
+    beta_mode = os.getenv("GARDEN_BETA_MODE", "").strip().casefold() in {
+        "1", "true", "yes", "on",
+    }
+    beta_cloud = os.getenv("GARDEN_BETA_CLOUD_URL", "").strip().rstrip("/")
+    if beta_mode and beta_cloud:
+        from core.credentials import load_secret
+
+        try:
+            session_token = load_secret(SAVED_BETA_SESSION_PATH).strip()
+        except Exception:
+            session_token = ""
+        return LLMConfig(
+            api_key=session_token,
+            base_url=f"{beta_cloud}/api/model/v1",
+            model=os.getenv("GARDEN_BETA_MODEL", "glm-5.2").strip(),
+        )
     api_key = os.getenv("GARDEN_API_KEY", "").strip()
     saved_key_allowed = os.getenv("GARDEN_DISABLE_SAVED_API_KEY", "").strip() != "1"
     configured_base_url = os.getenv("GARDEN_BASE_URL", "").strip()

@@ -4,13 +4,16 @@ import re
 from pathlib import Path
 from typing import Any
 
+from core.config import closed_loop_generation_timeout_seconds
 from core.learning_memory import LearningMemoryService
-from core.llm import LLMError, chat_json
+from core.llm import LLMError, chat, chat_json
 from core.obsidian import parse_markdown, write_wiki_asset
 from core.reasoning_capability import (
     classify_reasoning_task,
+    is_self_contained_reasoning,
     reasoning_prompt,
     review_reasoning_answer,
+    science_precision_instruction,
 )
 from core.retrieval import STOPWORDS, relevance_gate, search_notes
 from core.storage import GardenStore, utc_now
@@ -73,9 +76,77 @@ def _fallback_inspiration_answer(message: str, kind: str) -> str:
     ])
 
 
+_META_REFUSAL_LANGUAGE = re.compile(
+    r"这次先不{1,2}(?:补写|写)?答案|这次先不回答|"
+    r"(?:^|[\n。！？])\s*(?:我|本次|当前)(?:先|暂时)?不(?:直接)?(?:回答|作答|给出答案)|"
+    r"(?:^|\n)\s*(?:先|暂时)不(?:直接)?(?:回答|作答|给出答案)|"
+    r"(?:^|[\n。！？])\s*(?:抱歉[，,]?\s*)?(?:我|本次|当前|现阶段)?\s*"
+    r"(?:不能|无法|不方便)(?:直接)?(?:回答|作答|给出答案)(?:这个|该)?(?:问题)?|"
+    r"(?:^|[\n。！？])\s*(?:这个|该)?问题\s*(?:我|本次|当前)?\s*"
+    r"(?:不能|无法|不方便)(?:直接)?(?:回答|作答|给出答案)|"
+    r"当前无法(?:给出)?(?:答案|回答)|请(?:重新提问|重试本题|稍后再试|换个问题)|"
+    r"证据不足所以不回答|没有取得足够.{0,20}证据.{0,30}(?:不回答|补充.*来源)",
+    re.I | re.S,
+)
+
+_AUDITABLE_CODE_REQUEST = re.compile(
+    r"Python|SymPy|Z3|pgmpy|RDKit|Qiskit|COBRApy|代码|脚本|编程|"
+    r"数值积分器|求解器|算法实现|编写.{0,12}(?:程序|算法)|实现.{0,12}(?:算法|模拟|求解|验证)",
+    re.I,
+)
+
+
+def _decode_document_newlines(text: str) -> str:
+    """Decode model-escaped document newlines without corrupting LaTeX \nabla."""
+    value = str(text or "")
+    looks_like_escaped_document = bool(re.search(
+        r"\\n\\n|\\n(?:```|#{1,6}\s|[（(【]|\d+[.)、])",
+        value,
+    ))
+    if not looks_like_escaped_document:
+        return value
+    return re.sub(
+        r"\\n(?!(?:abla|eq|e\b|ot|u\b|atural|eg)\b)",
+        "\n",
+        value,
+    )
+
+
+def _rigorous_failure_answer(message: str, profile: dict[str, Any]) -> str:
+    """Give a useful, bounded path when both reasoning model calls fail."""
+    task = message.strip(" ：:，,。？！? ")[:240]
+    key = str(profile.get("key") or "")
+    method = {
+        "mathematical_proof": (
+            "先把命题写成“前提—待证结论”，检查量词与定义域；再分别尝试直接推导、反证或构造反例。"
+            "每一步只使用已经写明的定义或定理，并用一个边界情形检查结论是否过强。"
+        ),
+        "physical_modelling": (
+            "先列系统边界、状态量、守恒律和近似条件；随后做量纲检查，再求极限情形与数值尺度。"
+            "若不同模型都能解释现象，应明确指出还缺哪一个可区分它们的观测量。"
+        ),
+        "algorithmic_reasoning": (
+            "先明确输入、输出和不变量，再写最小伪代码；随后检查终止性、正确性与时间/空间复杂度，"
+            "最后用空输入、单元素和最坏结构三个边界样例反测。"
+        ),
+        "constructive_calculation": (
+            "先抄清已知量、未知量和单位，再选公式并逐步代入；计算后用量纲、符号、数量级和特殊值回代四项复核。"
+        ),
+        "argument_analysis": (
+            "先拆出前提、隐含假设和结论，再检查结论是否真的由前提推出；随后给出最小反例或缺失条件。"
+        ),
+    }.get(key, "先列出已知、目标与约束，再逐步推导，并用边界情形和反例复核每个关键跳步。")
+    return (
+        f"这是一道题面自足的任务：{task}。可以先按下面的可验证路径推进。\n\n"
+        f"{method}\n\n"
+        "当前最重要的是把第一个不可跳过的中间结论写出来；即使完整推导较长，也应先给出这一步及其验证方法，"
+        "而不是把外部检索当作回答前提。"
+    )
+
+
 def _normalize_inspiration_answer(value: Any) -> str:
     if isinstance(value, str):
-        return value.strip()
+        return _decode_document_newlines(value).strip()
     if isinstance(value, list):
         return "\n\n".join(str(item).strip() for item in value if str(item).strip())
     if isinstance(value, dict):
@@ -159,7 +230,33 @@ def explore_inspiration(
     ]
     kind, needs_anchor = _fallback_type(message)
     reasoning_profile = classify_reasoning_task(message)
+    auditable_code_requested = bool(_AUDITABLE_CODE_REQUEST.search(message))
+    rigorous_closed_loop = bool(
+        reasoning_profile.get("activated")
+        and (
+            is_self_contained_reasoning(message, reasoning_profile)
+            or auditable_code_requested
+        )
+        and (
+            auditable_code_requested
+            or reasoning_profile.get("key") in {
+                "mathematical_proof", "physical_modelling", "algorithm_design",
+                "code_diagnosis", "constructive_calculation", "argument_analysis",
+            }
+        )
+        and (
+            auditable_code_requested
+            or re.search(
+                r"证明|推导|计算|求出|导出|判断|收敛半径|特征值|不动点|Jacobian",
+                message,
+                re.I,
+            )
+        )
+    )
+    if rigorous_closed_loop:
+        kind, needs_anchor = "rigorous_exploration", False
     reasoning_guide = reasoning_prompt(reasoning_profile, surface="inspiration")
+    precision_guide = science_precision_instruction(message)
     memory = LearningMemoryService(store)
     turn = memory.begin_turn(message, session_id, capability="inspiration")
     session_id = turn["session_id"]
@@ -195,8 +292,74 @@ def explore_inspiration(
         f"[{index}]《{item['title']}》：{item['snippet']}" for index, item in enumerate(anchors, 1)
     ) or "本轮没有取得可核验的事实锚点"
     payload = None
-    try:
-        payload = chat_json(
+    generation_failed = False
+    generation_errors: list[str] = []
+    if rigorous_closed_loop:
+        auditable_code_required = auditable_code_requested
+        auditable_code_instruction = (
+            "题目明确要求代码或科学工具：最终正文必须至少包含一个以 ```python 开始、以 ``` 结束的"
+            "完整 Python 代码块；代码要写明依赖与输入，禁止只给伪代码，禁止把未运行内容声称为实测结果。"
+            if auditable_code_required else ""
+        )
+        closed_loop_system_prompt = (
+            "你是灵感检测中的基础学科严谨推理伙伴。当前问题是题面自足的证明、推导或计算，"
+            "必须直接完成推导，并给出关键公式、成立条件、反例或机制辨析。可以补充另一条思路，"
+            "但严禁套用人物动机、情绪、群体氛围等心理分析模板。输出可独立展示的完整正文，"
+            "不要输出 JSON、审校意见或增量补丁。"
+            + auditable_code_instruction
+            + precision_guide
+        )
+        closed_loop_user_prompt = (
+            f"当前问题：{message}\n{reasoning_guide}\n{preference_guide}\n"
+            f"{auditable_code_instruction}\n{precision_guide}"
+        )
+        try:
+            plain_answer = chat(
+                closed_loop_system_prompt,
+                closed_loop_user_prompt,
+                temperature=0.25, timeout=closed_loop_generation_timeout_seconds(), max_retries=0,
+            )
+            if plain_answer and plain_answer.strip():
+                payload = {
+                    "primary_type": kind, "secondary_types": ["closed_loop_reasoning"],
+                    "answer": plain_answer.strip(),
+                    "acknowledgement": "这是一道适合从形式推导与反例两侧展开的问题。",
+                    "assumptions": [], "claims": [], "counter_view": "",
+                    "branches": [
+                        {"title": "复核关键等式", "question": "你想逐项检查哪一个中间公式？"},
+                        {"title": "寻找边界反例", "question": "若放松一个成立条件，结论会怎样失效？"},
+                    ],
+                }
+        except LLMError as exc:
+            generation_errors.append(str(exc)[:500])
+        if payload is None:
+            # Keep retry budget below the outer evaluation wall clock. This
+            # catches a transient overload/timeout without waiting another
+            # full closed-loop timeout window.
+            try:
+                plain_answer = chat(
+                    closed_loop_system_prompt,
+                    closed_loop_user_prompt,
+                    temperature=0.25,
+                    timeout=min(30.0, closed_loop_generation_timeout_seconds()),
+                    max_retries=0,
+                )
+                if plain_answer and plain_answer.strip():
+                    payload = {
+                        "primary_type": kind, "secondary_types": ["closed_loop_reasoning"],
+                        "answer": plain_answer.strip(),
+                        "acknowledgement": "这是一道适合从形式推导与反例两侧展开的问题。",
+                        "assumptions": [], "claims": [], "counter_view": "",
+                        "branches": [
+                            {"title": "复核关键等式", "question": "你想逐项检查哪一个中间公式？"},
+                            {"title": "寻找边界反例", "question": "若放松一个成立条件，结论会怎样失效？"},
+                        ],
+                    }
+            except LLMError as exc:
+                generation_errors.append(str(exc)[:500])
+    else:
+        try:
+            payload = chat_json(
             "你是知识花园的灵感讨论伙伴：聪明、细腻、愿意思辨，不是分类器、答案裁判或教科书复读机。"
             "先理解用户真正惊讶、困惑、在意或想推演的具体问题，然后给出一段自然、连贯、信息密度高的中文回答。"
             "answer 是展示给用户的主体：通常写 450～850 个汉字；问题简单也至少把一个解释讲透，"
@@ -218,9 +381,26 @@ def explore_inspiration(
             f"{reasoning_guide}\n{preference_guide}\n"
             f"仅供选择的直接相关资料：\n{anchor_text}\n"
             "请直接回应当前问题，承接最近上下文，不要把不相关教材塞进回答。",
-        )
-    except LLMError:
-        payload = None
+            )
+        except LLMError as exc:
+            generation_errors.append(str(exc)[:500])
+            payload = None
+    if payload is None and rigorous_closed_loop:
+        generation_failed = True
+        payload = {
+            "primary_type": kind, "secondary_types": ["closed_loop_reasoning"],
+            "answer": _rigorous_failure_answer(message, reasoning_profile),
+            "acknowledgement": "先给出与题型匹配的可验证推进路径。",
+            "assumptions": [], "claims": [], "counter_view": "",
+            "branches": [
+                {"title": "检查第一步", "question": "先把第一个关键中间式写出来并逐项核对条件，结果是什么？"},
+                {"title": "寻找边界", "question": "把一个成立条件放宽后，最小反例会出现在哪里？"},
+            ],
+        }
+    if payload is None:
+        # A deterministic conversational fallback is still a model-generation
+        # failure.  Keep the fallback usable, but never count it as model success.
+        generation_failed = True
     payload = payload or {
         "primary_type": kind, "secondary_types": [],
         "answer": _fallback_inspiration_answer(message, kind),
@@ -267,6 +447,12 @@ def explore_inspiration(
             *[item["text"] for item in claims if item["text"]],
             str(payload.get("counter_view") or "").strip(),
         ])) or _fallback_inspiration_answer(message, kind)
+    if _META_REFUSAL_LANGUAGE.search(answer):
+        generation_failed = True
+        answer = (
+            _rigorous_failure_answer(message, reasoning_profile)
+            if rigorous_closed_loop else _fallback_inspiration_answer(message, kind)
+        )
     used_indexes = {
         int(item["anchor_index"]) for item in claims
         if item["status"] == "fact" and item.get("anchor_index") in valid_anchor_indexes
@@ -338,6 +524,18 @@ def explore_inspiration(
             for item in used_anchors
         ],
         "reasoning": reasoning_summary,
+        "generation_failed": generation_failed,
+        "generation_diagnostics": {
+            "errors": generation_errors,
+            "fallback_used": bool(generation_failed),
+            "mode": "closed_loop" if rigorous_closed_loop else "exploration",
+            "auditable_python_required": bool(
+                rigorous_closed_loop and auditable_code_requested
+            ),
+            "auditable_python_present": bool(re.search(
+                r"```(?:python|py)\s*\r?\n", answer, re.I,
+            )),
+        },
         "personalization": personalization,
         "notice": "开放讨论中的假设不会更新掌握度，也不会自动形成长期画像。",
     }

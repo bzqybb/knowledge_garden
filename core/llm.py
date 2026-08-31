@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from queue import Queue
 from threading import Thread
-from typing import Any
+from typing import Any, Callable
 
 from core.config import LLMConfig, llm_config, understanding_llm_config
 
@@ -14,8 +14,18 @@ class LLMError(RuntimeError):
 
 def _primary_provider_options(config: LLMConfig) -> dict[str, Any]:
     """Keep GLM's structured teaching answers responsive and JSON-compatible."""
-    if "bigmodel.cn" in config.base_url.casefold():
-        return {"extra_body": {"thinking": {"type": "disabled"}}}
+    if (
+        "bigmodel.cn" in config.base_url.casefold()
+        or config.base_url.rstrip("/").endswith("/api/model/v1")
+    ):
+        # GLM-5.x defaults to thinking.  Some Coding Plan gateways still emit a
+        # short reasoning prelude with ``thinking=disabled`` alone; explicitly
+        # setting the official zero-effort mode keeps the answer budget and
+        # wall-clock time available for user-visible content.
+        return {"extra_body": {
+            "thinking": {"type": "disabled"},
+            "reasoning_effort": "none",
+        }}
     return {}
 
 
@@ -74,7 +84,10 @@ def _model():
     )
 
 
-def chat(system: str, user: str, *, temperature: float = 0.3, json_mode: bool = False) -> str | None:
+def chat(
+    system: str, user: str, *, temperature: float = 0.3, json_mode: bool = False,
+    timeout: float = 60, max_retries: int = 2,
+) -> str | None:
     """Run the official LangChain LCEL prompt → model → parser pipeline."""
     config = llm_config()
     if not config.enabled:
@@ -86,16 +99,55 @@ def chat(system: str, user: str, *, temperature: float = 0.3, json_mode: bool = 
         base_url=config.base_url,
         model=config.model,
         temperature=temperature,
-        timeout=60,
-        max_retries=2,
+        timeout=timeout,
+        max_retries=max_retries,
         model_kwargs={"response_format": {"type": "json_object"}} if json_mode else {},
         **_primary_provider_options(config),
     )
     chain = prompt | model | StrOutputParser()
     try:
-        return chain.invoke({"system": system, "user": user}).strip()
+        return _invoke_with_hard_timeout(
+            lambda: chain.invoke({"system": system, "user": user}),
+            timeout,
+            "文本模型调用",
+        ).strip()
     except Exception as exc:
         raise LLMError(f"LangChain 大模型链执行失败：{exc}") from exc
+
+
+def chat_stream(
+    system: str, user: str, *, on_delta: Callable[[str], None],
+    temperature: float = 0.3, timeout: float = 60, max_retries: int = 1,
+) -> str | None:
+    """Forward genuine provider chunks and return the complete answer."""
+    config = llm_config()
+    if not config.enabled:
+        return None
+    _, ChatOpenAI, _, _ = _langchain_components()
+    model = ChatOpenAI(
+        api_key=config.api_key, base_url=config.base_url, model=config.model,
+        temperature=temperature, timeout=timeout, max_retries=max_retries,
+        **_primary_provider_options(config),
+    )
+    parts: list[str] = []
+    try:
+        for chunk in model.stream([("system", system), ("human", user)]):
+            content = chunk.content
+            if isinstance(content, str):
+                delta = content
+            elif isinstance(content, list):
+                delta = "".join(
+                    str(item.get("text", "")) if isinstance(item, dict) else str(item)
+                    for item in content
+                )
+            else:
+                delta = str(content or "")
+            if delta:
+                parts.append(delta)
+                on_delta(delta)
+    except Exception as exc:
+        raise LLMError(f"LangChain 流式模型调用失败：{exc}") from exc
+    return "".join(parts).strip()
 
 
 def chat_json(
@@ -182,7 +234,10 @@ def _configured_json_model(
         max_retries=max_retries,
         model_kwargs={"response_format": {"type": "json_object"}},
         # Problem parsing is a bounded routing task, not deep research.
-        extra_body={"thinking": {"type": "disabled"}} if is_glm else None,
+        extra_body={
+            "thinking": {"type": "disabled"},
+            "reasoning_effort": "none",
+        } if is_glm else None,
     )
 
 

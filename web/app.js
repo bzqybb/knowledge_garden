@@ -2,23 +2,25 @@ const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 let state = { stats: {}, settings: {}, tasks: [], cards: [], feeds: [], report: {}, agent: {} };
 let graphData = { nodes: [], edges: [] };
+let currentMindmapData = null;
+const mindmapDiagramCache = new Map();
+let mindmapCollapsed = new Set(JSON.parse(localStorage.getItem("garden.mindmapCollapsed")||"[]"));
 let dailyItems = [];
 const taskCache = new Map();
 let activeReviewTask = null;
 let lastAgentExchange = null;
 let reviewConversation = [];
 let inspirationConversation = [];
-try { inspirationConversation = JSON.parse(localStorage.getItem("garden.inspirationConversation") || "[]"); } catch (_) { inspirationConversation = []; }
-let inspirationSessionId = localStorage.getItem("garden.inspirationSessionId") || crypto.randomUUID();
+let storageScope = "local";
+const storageKey = name => storageScope === "local" ? `garden.${name}` : `garden.${storageScope}.${name}`;
+let inspirationSessionId = crypto.randomUUID();
 let latestInspiration = null;
 let agentConversation = [];
-try { agentConversation = JSON.parse(localStorage.getItem("garden.agentConversation") || "[]"); } catch (_) { agentConversation = []; }
 const AGENT_HISTORY_LIMIT = 20;
 const AGENT_VISIBLE_MESSAGES = 8;
 let agentHistoryExpanded = false;
-let agentSessionId = localStorage.getItem("garden.agentSessionId") || crypto.randomUUID();
-localStorage.setItem("garden.agentSessionId", agentSessionId);
-let showProposedCrossLinks = localStorage.getItem("garden.showProposedCrossLinks") === "1";
+let agentSessionId = crypto.randomUUID();
+let showProposedCrossLinks = false;
 let wechatPreview = null;
 let officialAccounts = [];
 let officialArticles = [];
@@ -26,12 +28,92 @@ const officialArticlePreviews = new Map();
 let readingArticle = null;
 let readingConversation = [];
 let readingSessionId = crypto.randomUUID();
+let currentAuthStatus = null;
+let isPublicMode = false;
+let isBetaDesktop = false;
 
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
   const data = await response.json();
+  if(response.status===401){showAuthGate();throw new Error(data.error||"请先登录")}
   if (!response.ok || data.ok === false) throw new Error(data.error || "操作没有完成");
   return data;
+}
+
+function showAuthGate(){const gate=$("#auth-gate");if(gate)gate.hidden=false}
+function activateUserScope(userId="local"){
+  storageScope=userId||"local";
+  try{agentConversation=JSON.parse(localStorage.getItem(storageKey("agentConversation"))||"[]")}catch(_){agentConversation=[]}
+  agentConversation=agentConversation.slice(-AGENT_HISTORY_LIMIT).map(message=>(
+    message?.role==="user"?{...message,content:withoutEmbeddedMaterial(message.content)}:message
+  )).filter(message=>!(message?.role==="assistant"&&isLegacyMetaRefusal(message.content)));
+  localStorage.setItem(storageKey("agentConversation"),JSON.stringify(agentConversation));
+  agentSessionId=localStorage.getItem(storageKey("agentSessionId"))||crypto.randomUUID();
+  localStorage.setItem(storageKey("agentSessionId"),agentSessionId);
+  try{inspirationConversation=JSON.parse(localStorage.getItem(storageKey("inspirationConversation"))||"[]")}catch(_){inspirationConversation=[]}
+  inspirationConversation=inspirationConversation.filter(message=>!(message?.role==="assistant"&&isLegacyMetaRefusal(message.content)));
+  localStorage.setItem(storageKey("inspirationConversation"),JSON.stringify(inspirationConversation));
+  inspirationSessionId=localStorage.getItem(storageKey("inspirationSessionId"))||crypto.randomUUID();
+  showProposedCrossLinks=localStorage.getItem(storageKey("showProposedCrossLinks"))==="1";
+  if($("#show-cross-links"))$("#show-cross-links").checked=showProposedCrossLinks;
+  const restoredAssistant=[...agentConversation].reverse().find(item=>item.role==="assistant"&&item.result);
+  const restoredQuestion=[...agentConversation].reverse().find(item=>item.role==="user"&&!item.kind)?.content;
+  lastAgentExchange=restoredAssistant?{question:restoredQuestion||"",...restoredAssistant.result}:null;
+  const restoredInspiration=[...inspirationConversation].reverse().find(item=>item.role==="assistant"&&item.result);
+  latestInspiration=restoredInspiration?.result||null;
+  if(latestInspiration)latestInspiration.branches=normalizeInspirationBranches(latestInspiration.branches);
+  renderAgentConversation();renderInspiration();
+}
+async function loadImprovementStatus(){
+  const input=$("#improvement-consent"),label=$("#improvement-status");if(!input||!currentAuthStatus?.authenticated)return;
+  const data=await api("/api/improvement/status"),result=data.result||{};
+  input.checked=Boolean(result.consent);
+  const total=(result.counts||[]).reduce((sum,item)=>sum+Number(item.n||0),0);
+  label.textContent=result.consent?`已授权；目前有 ${total} 条脱敏候选样例。保留集不会用于优化。`:"尚未授权贡献评测样例。";
+}
+async function initializeApplication(){
+  const status=await api("/api/auth/status");currentAuthStatus=status;
+  isBetaDesktop=Boolean(status.beta_required);
+  $("#auth-register").hidden=!status.allow_signup;
+  $("#auth-hint").textContent=status.allow_signup?"可以创建公测账号；每个账号使用独立知识库和独立额度限制。":"当前站点仅允许已有账号登录。";
+  $("#auth-description").textContent=isBetaDesktop?"登录公测账号后即可使用项目方提供的 GLM 模型额度；你不需要填写 API Key。":"登录后，问题、偏好、知识库与评测授权都保存在你的独立空间。";
+  if((status.required&&!status.authenticated)||(isBetaDesktop&&!status.beta_authenticated)){showAuthGate();return}
+  $("#auth-gate").hidden=true;
+  $("#auth-user").hidden=!(status.required||isBetaDesktop);$("#auth-logout").hidden=!(status.required||isBetaDesktop);
+  const activeUser=isBetaDesktop?status.beta_user:status.user;
+  if(activeUser)$("#auth-user").textContent=activeUser.email;
+  isPublicMode=Boolean(status.required);
+  document.body.classList.toggle("public-mode",isPublicMode);
+  configurePublicExperience();
+  activateUserScope(activeUser?.id||"local");
+  await bootstrap();
+  await loadImprovementStatus();
+  setInterval(()=>loadDaily(false),15*60*1000);
+}
+
+function configurePublicExperience(){
+  const capabilityCard=$("#public-experience");
+  if(capabilityCard)capabilityCard.hidden=!isPublicMode;
+  if(!isPublicMode)return;
+  $("[data-view='wechat']")?.setAttribute("hidden","");
+  $("#view-wechat")?.setAttribute("hidden","");
+  const privacy=$(".privacy");if(privacy)privacy.textContent="◉ 账号隔离花园";
+  const syncLabel=$("#sync-label");if(syncLabel)syncLabel.textContent="云端隔离空间";
+  const vault=$("#vault-path");if(vault){vault.value="";vault.disabled=true;vault.closest("label")?.setAttribute("hidden","")}
+  ["#import-textbooks","#ingest-raw","#agent-patrol"].forEach(selector=>{
+    const node=$(selector);if(node)node.closest("article")?.setAttribute("hidden","");
+  });
+  $$('[data-go="wechat"]').forEach(node=>node.closest("article")?.setAttribute("hidden",""));
+  const submit=$("#settings-form button[type='submit']");if(submit)submit.textContent="保存学习画像";
+  const bili=$("#bilibili-mcp-status");if(bili)bili.textContent="B站字幕与本地 ASR 需桌面连接器；公开版可粘贴已取得的字幕或正文测试导读。";
+}
+async function performAuth(mode){
+  const email=$("#auth-email").value.trim(),password=$("#auth-password").value;
+  if(!email||!password)return;
+  busy(true,mode==="register"?"正在创建你的独立花园……":"正在进入你的花园……");
+  const prefix=isBetaDesktop?"/api/beta":"/api/auth";
+  try{await api(`${prefix}/${mode}`,{method:"POST",body:JSON.stringify({email,password})});location.reload()}
+  catch(err){toast(err.message,true)}finally{busy(false)}
 }
 
 function toast(message, error = false) {
@@ -59,14 +141,14 @@ function formatGardenerMarkdown(value = "") {
   });
   return blocks.filter(Boolean).join("\n\n");
 }
-agentConversation = agentConversation.slice(-AGENT_HISTORY_LIMIT).map(message => (
-  message?.role === "user" ? {...message, content:withoutEmbeddedMaterial(message.content)} : message
-));
 function renderMarkdown(value = "") {
+  const mathSafeValue=String(value)
+    .replace(/\$\$[\s\S]*?\$\$/g, block=>block.replace(/\r?\n/g," "))
+    .replace(/\\\[[\s\S]*?\\\]/g, block=>block.replace(/\r?\n/g," "));
   const inline = text => escapeHTML(text)
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g, '<span class="wiki-link">$1</span>');
-  return String(value).split(/\r?\n/).map(line => {
+  return mathSafeValue.split(/\r?\n/).map(line => {
     const clean = line.trim();
     if (!clean || clean.startsWith("<!--") || clean === "---") return "";
     if (/^#\s+/.test(clean)) return "";
@@ -81,6 +163,14 @@ function renderMarkdown(value = "") {
     return `<p>${inline(clean)}</p>`;
   }).join("");
 }
+
+function typesetMath(root=document){
+  if(!window.MathJax?.typesetPromise)return false;
+  window.MathJax.typesetClear?.([root]);
+  window.MathJax.typesetPromise([root]).catch(()=>{});
+  return true;
+}
+window.addEventListener("mathjax-ready",()=>typesetMath(document));
 
 function renderPlannerAudit(result = {}) {
   const plan=result.planner||{};
@@ -114,11 +204,14 @@ function renderAgentVisualization(spec = {}) {
 }
 
 function switchView(name) {
+  if(isPublicMode&&name==="wechat"){name="settings";toast("微信需要用户电脑上的桌面连接器",true)}
   $$(".nav").forEach(n => n.classList.toggle("active", n.dataset.view === name));
+  $("#nav-more")?.classList.toggle("active",["capture","wechat","settings"].includes(name));
   $$(".view").forEach(v => v.classList.toggle("active", v.id === `view-${name}`));
-  const titles = {home:"早上好，园丁",frontier:"前沿雷达",garden:"我的知识树",capture:"灵感温室",wechat:"微信苗圃",settings:"花园设置"};
+  const titles = {home:"早上好，园丁",frontier:"前沿雷达",growth:"我的成长",garden:"学科思维导图",capture:"灵感温室",wechat:"微信苗圃",settings:"花园设置"};
   $("#page-title").textContent = titles[name];
   if (name === "garden") loadGarden();
+  if (name === "growth") loadGrowth();
   if (name === "frontier") loadFrontierNotes();
   if (name === "wechat") loadWechatCandidates();
   scrollTo({top:0,behavior:"smooth"});
@@ -128,7 +221,10 @@ async function bootstrap() {
   state = await api("/api/bootstrap");
   renderAll();
   loadDaily();
-  loadBilibiliMcpStatus();
+  if(!isPublicMode)loadBilibiliMcpStatus();
+}
+function isLegacyMetaRefusal(value=""){
+  return /这次先不{1,2}(?:补写|写)?答案|这次先不回答|(?:^|[\n。！？])\s*(?:我|本次|当前)(?:先|暂时)?不(?:直接)?(?:回答|作答|给出答案)|(?:^|\n)\s*(?:先|暂时)不(?:直接)?(?:回答|作答|给出答案)|当前无法(?:给出)?(?:答案|回答)|请(?:重新提问|重试本题|稍后再试|换个问题)|证据不足所以不回答/.test(String(value));
 }
 
 function renderAll() {
@@ -137,8 +233,10 @@ function renderAll() {
   $("#m-completed").textContent = s.completed_tasks || 0; $("#m-links").textContent = s.links || 0;
   $("#side-level").textContent = `Lv.${s.level || 1}`; $("#side-xp").textContent = `${s.level_progress || 0} / 100 XP`;
   $("#side-progress").style.width = `${s.level_progress || 0}%`;
-  $("#sync-label").textContent = state.settings.vault_path ? "Obsidian 已连接" : "等待连接 Obsidian";
+  $("#sync-label").textContent = isPublicMode ? "云端隔离空间" : state.settings.vault_path ? "Obsidian 已连接" : "等待连接 Obsidian";
   $("#sync-dot").style.background = state.settings.vault_path ? "#8ebd7c" : "#d9a843";
+  const companion=$("#desktop-companion-card"),download=$("#desktop-download");
+  if(companion){companion.hidden=!state.settings.public_mode;if(download){const url=state.settings.desktop_download_url||"#";download.href=url;download.textContent=url==="#"?"桌面版准备中":"下载桌面伴侣";download.setAttribute("aria-disabled",url==="#"?"true":"false")}}
   $("#vault-path").value = state.settings.vault_path || ""; $("#learning-level").value = state.settings.learning_level || "本科入门";
   $("#interests").value = (state.settings.interests || []).join("、");
   $("#frontier-focus").value = state.settings.frontier_focus || "";
@@ -148,11 +246,11 @@ function renderAll() {
   if($("#rebuild-links"))$("#rebuild-links").textContent=pendingClassification?`复核待分类新知（${pendingClassification}）`:"重新整理结构与连接";
   const llmOn = state.settings.llm_enabled;
   const llmState = state.settings.llm_status || (llmOn ? "connected" : "offline");
-  $("#llm-status").textContent = state.settings.llm_message || (llmOn ? "已启用兼容大模型，将按你的水平生成讲解。" : "当前使用离线规则；配置理解 API 可启用深度讲解。");
+  $("#llm-status").textContent = state.settings.llm_message || (llmOn ? "已启用兼容大模型，将按你的水平生成讲解。" : state.settings.beta_mode ? "登录公测账号后即可使用项目方提供的 GLM 模型。" : "当前使用离线规则；配置理解 API 可启用深度讲解。");
   const badgeLabels = { connected: "已连接", checking: "验证中", invalid_key: "密钥无效", limited: "额度受限", error: "连接失败", offline: "离线模式" };
   $("#llm-badge").textContent = badgeLabels[llmState] || "离线模式"; $("#llm-badge").classList.toggle("on", llmOn);
   renderWechatStatus(state.settings.wechat || {});
-  renderTasks("#task-list", state.tasks.slice(0, 4)); renderCards(); renderReport(); renderFeeds();
+  renderTasks("#task-list", state.tasks.slice(0, 4)); renderReport(); renderFeeds();
   renderAgent();
 }
 
@@ -160,6 +258,11 @@ let textbookOcrTimer = null;
 function renderTextbookOcr(status) {
   const label = $("#textbook-ocr-status");
   if (!label) return;
+  if(isPublicMode){
+    if(textbookOcrTimer){clearInterval(textbookOcrTimer);textbookOcrTimer=null}
+    label.textContent="本地教材与 OCR 需桌面连接器。";
+    return;
+  }
   const current = status.current || {};
   label.textContent = status.running
     ? `本地 OCR 识别中：${current.title || "扫描教材"} ${current.page || 0}/${current.pages || "?"} 页；累计入库 ${status.indexed_pages || 0} 页`
@@ -329,7 +432,12 @@ function renderReadingConversation() {
     const prompts = (result.discussion_prompts||[]).slice(0,3).map(prompt=>`<button class="secondary reading-prompt" type="button" data-prompt="${escapeHTML(prompt)}">${escapeHTML(prompt)}</button>`).join("");
     return `<div class="chat-turn assistant-turn"><small>导读园丁</small>${renderMarkdown(message.content)}${result.followup?`<div class="review-followup"><b>接着可以想</b><p>${escapeHTML(result.followup)}</p>${prompts}</div>`:""}</div>`;
   }).join("");
-  $$(".reading-prompt").forEach(button=>button.onclick=()=>{$("#reading-question").value=button.dataset.prompt;$("#reading-question").focus()});
+  $$(".reading-prompt").forEach(button=>button.onclick=()=>{
+    const input=$("#reading-question"),prompt=button.dataset.prompt||"";
+    input.value="";
+    input.placeholder=prompt?`园丁刚才问：${prompt} —— 请写下你自己的回应`:`写下你自己的回应……`;
+    input.focus();
+  });
   host.scrollTop = host.scrollHeight;
 }
 
@@ -439,11 +547,6 @@ function renderTasks(selector, tasks) {
   host.innerHTML = tasks.map(t => {const prompt=t.payload?.question||((t.payload?.questions||[])[0])||"";return `<div class="task ${t.status === "done" ? "done" : ""}"><span class="task-icon">${{quiz:"?",recall:"↺",socratic:"✦",frontier:"⌁"}[t.task_type] || "•"}</span><div class="task-copy"><b>${escapeHTML(t.title)}</b><small>${t.xp} XP · ${t.task_type === "quiz" ? "小测验" : t.task_type === "socratic" ? "苏格拉底追问" : t.task_type === "frontier" ? "前沿待嫁接" : "主动回忆"}</small>${prompt?`<p class="task-prompt">${escapeHTML(prompt)}</p>`:""}</div>${t.status === "done" ? '<span>✓</span>' : `<button onclick="openReview(${t.id})">${t.task_type === "frontier" ? "学习" : "回答"}</button>`}</div>`}).join("");
 }
 
-function renderCards() {
-  const cards = state.cards || []; const host = $("#recent-cards");
-  host.innerHTML = cards.length ? cards.slice(0,3).map(c => `<div class="bloom-card"><small>✿ 教材 × 前沿</small><h4>${escapeHTML(c.concept)}</h4><p>${escapeHTML(excerpt(c.explanation))}</p></div>`).join("") : '<div class="empty">第一朵花还在等待。分析一篇前沿材料，让它绽放。</div>';
-}
-
 function renderReport() {
   const r = state.report || {}; $("#report-title").textContent = r.title || "学习周报"; $("#report-insight").textContent = r.insight || "你的花园正在准备发芽。";
   $("#report-concepts").innerHTML = (r.new_concepts || []).map(c => `<span class="chip">${escapeHTML(c)}</span>`).join("") || '<span class="chip">等待新概念</span>';
@@ -470,15 +573,17 @@ function renderDeepRead(result={}){
 async function loadDaily(force=false){
   try{
     const data=await api(`/api/daily${force?"?refresh=1":""}`);dailyItems=data.items||[];
-    const profile=data.profile||{},basis=profile.basis||[];
-    $("#daily-profile").textContent=`${basis.join("；")||"尚未设置专业或兴趣"} · ${data.level||"本科入门"}`;
+    const profile=data.profile||{},basis=profile.basis||[],directions=data.chosen_directions||[];
+    $("#daily-profile").innerHTML=`本轮巡视：<b>${escapeHTML(directions.join("、")||"等待选择方向")}</b> · ${escapeHTML(data.level||"本科入门")}${basis.length?` <details class="profile-basis"><summary>为什么选这些</summary>${basis.map(item=>`<span>${escapeHTML(item)}</span>`).join("")}</details>`:""}`;
     updateFrontierAlert(dailyItems,data);
     const notice=data.notice?`<div class="source-notice">${escapeHTML(data.notice)}</div>`:"";
-    $("#daily-digest").innerHTML=notice+(dailyItems.length?dailyItems.map((item,index)=>{
-      const g=item.reading_guide||{},scores=item.scores||{},links=(item.connections||[]).map(c=>`《${escapeHTML(c.title)}》`).join("、"),access=item.pdf_url?"可尝试开放全文":"摘要深读";
-      return `<article class="daily-card ${item.read?"is-read":""}"><span>${escapeHTML(item.interest||"前沿推荐")} · ${escapeHTML(item.year||"")} · ${access} ${item.read?"· 已读":""}</span><h4><a href="${escapeHTML(safeURL(item.url))}" target="_blank" rel="noopener noreferrer">${escapeHTML(item.title)}</a></h4><p>${escapeHTML(item.why)}</p>${links?`<small>知识树连接：${links}</small>`:""}<div class="frontier-scores"><span>领域 ${Math.round((scores.domain_match||0)*100)}%</span><span>衔接 ${Math.round((scores.knowledge_connection||0)*100)}%</span><span>来源 ${Math.round((scores.source_quality||0)*100)}%</span><span>新鲜 ${Math.round((scores.freshness||0)*100)}%</span></div><details class="reading-guide"><summary>查看读前导读</summary><div><b>读前 · 先预测</b><p>${escapeHTML(g.before_reading||"")}</p><b>方向提示</b><p>${escapeHTML(g.orientation||"")}</p><b>读中检查点</b><ol>${(g.checkpoints||[]).map(q=>`<li>${escapeHTML(q)}</li>`).join("")}</ol><b>读后 · 带走什么</b><p>${escapeHTML(g.after_reading||"")}</p></div></details><div id="deep-read-${index}">${item.deep_read?renderDeepRead(item.deep_read):""}</div><div class="daily-actions"><button class="primary" onclick="deepReadDaily(${index})">${item.deep_read?"重新深读":"深读这篇论文"}</button><button class="secondary" onclick="askDaily(${index})">互动追问</button><button class="secondary" onclick="markDailyRead(${index})" ${item.read?"disabled":""}>${item.read?"已标记阅读":"标记已读"}</button><button class="text-btn" onclick="saveDaily(${index})">确认加入知识库</button></div></article>`;
-    }).join(""):`<div class="empty">${escapeHTML(data.message||"今天暂时没有推荐。")}</div>`);
-  }catch(err){$("#daily-digest").innerHTML=`<div class="empty">每日推送暂时不可用：${escapeHTML(err.message)}</div>`}
+    $("#daily-digest").innerHTML=dailyItems.length?notice+dailyItems.map((item,index)=>{
+      const scores=item.scores||{},connections=item.connections||[],access=item.pdf_url?"可尝试开放全文":"摘要深读",published=item.publication_date||item.year||"日期未知",authors=(item.authors||[]).slice(0,3).join("、")||"作者未知",venue=item.venue||item.source||"刊物未知";
+      const links=connections.map(c=>`<li><b>${escapeHTML(c.relation||"知识连接")} · 《${escapeHTML(c.title)}》</b><span>${escapeHTML(c.explanation||`共同概念：${(c.terms||[]).join("、")}`)}</span><small>连接强度 ${Math.round(Number(c.strength||0)*100)}%</small></li>`).join("");
+      return `<article class="daily-card ${item.read?"is-read":""}"><span>${escapeHTML(item.interest||"前沿推荐")} · ${access} ${item.read?"· 已读":""}</span><h4><a href="${escapeHTML(safeURL(item.url))}" target="_blank" rel="noopener noreferrer">${escapeHTML(item.title)}</a></h4><div class="paper-meta"><span><b>发表</b>${escapeHTML(published)}</span><span><b>刊物/会议</b>${escapeHTML(venue)}</span><span><b>作者</b>${escapeHTML(authors)}</span><span><b>数据源</b>${escapeHTML(item.source||"未知")}</span></div><p>${escapeHTML(item.why)}</p>${links?`<div class="knowledge-connection"><b>它怎样连接你的知识</b><ol>${links}</ol></div>`:'<div class="knowledge-connection weak"><b>与你的知识暂无强关联</b><p>当前只作为领域候选，不会因为模糊词语被冒充成个性化推荐。</p></div>'}<div class="frontier-scores"><span>领域 ${Math.round((scores.domain_match||0)*100)}%</span><span>衔接 ${Math.round((scores.knowledge_connection||0)*100)}%</span><span>来源 ${Math.round((scores.source_quality||0)*100)}%</span><span>新鲜 ${Math.round((scores.freshness||0)*100)}%</span></div><div id="deep-read-${index}">${item.deep_read?renderDeepRead(item.deep_read):""}</div><div class="daily-actions"><button class="primary" onclick="deepReadDaily(${index})">${item.deep_read?"重新深读":"深读这篇论文"}</button><button class="secondary" onclick="askDaily(${index})">互动追问</button><button class="secondary" onclick="markDailyRead(${index})" ${item.read?"disabled":""}>${item.read?"已标记阅读":"标记已读"}</button><button class="text-btn" onclick="saveDaily(${index})">确认加入知识库</button></div></article>`;
+    }).join(""):`<section class="daily-empty"><b>这轮没有找到足够相关的论文</b><p>没有拿无关论文凑数。学术来源可能正在限流，或者当前方向在最近半年没有合适结果。</p><button class="secondary" id="retry-daily-direction">换一组方向重试</button><details><summary>查看技术信息</summary><small>${escapeHTML(data.notice||data.message||"来源没有返回结果")}</small></details></section>`;
+    const retry=$("#retry-daily-direction");if(retry)retry.onclick=()=>loadDaily(true);
+  }catch(err){$("#daily-digest").innerHTML=`<section class="daily-empty"><b>每日巡视暂时没有连上</b><p>你的知识库不受影响，稍后可以重试。</p><button class="secondary" id="retry-daily-direction">重新尝试</button><details><summary>查看技术信息</summary><small>${escapeHTML(err.message)}</small></details></section>`;const retry=$("#retry-daily-direction");if(retry)retry.onclick=()=>loadDaily(true)}
 }
 
 function updateFrontierAlert(items,data={}){
@@ -489,12 +594,12 @@ function updateFrontierAlert(items,data={}){
   const directions=(data.chosen_directions||[]).join("、")||"你的当前方向";
   $("#frontier-alert-title").textContent=`发现 ${unread.length} 篇值得巡视的新资料`;
   $("#frontier-alert-detail").textContent=`本轮依据：${directions}。来源按匹配度、权威性、新鲜度和知识连接排序，不固定为某一本期刊。`;
-  const notified=new Set(JSON.parse(localStorage.getItem("garden.frontierNotifiedUrls")||"[]"));
+  const notified=new Set(JSON.parse(localStorage.getItem(storageKey("frontierNotifiedUrls"))||"[]"));
   const fresh=unread.filter(item=>item.url&&!notified.has(item.url));
   if(fresh.length&&window.Notification&&Notification.permission==="granted"){
-    new Notification("知识花园发现新前沿",{body:`${fresh[0].interest||directions}：${fresh[0].title}`,tag:"knowledge-garden-frontier"});
+    new Notification("致知花园发现新前沿",{body:`${fresh[0].interest||directions}：${fresh[0].title}`,tag:"knowledge-garden-frontier"});
     fresh.forEach(item=>notified.add(item.url));
-    localStorage.setItem("garden.frontierNotifiedUrls",JSON.stringify([...notified].slice(-200)));
+    localStorage.setItem(storageKey("frontierNotifiedUrls"),JSON.stringify([...notified].slice(-200)));
   }
 }
 
@@ -539,25 +644,44 @@ async function loadFrontierNotes() {
   } catch(e) { toast(e.message,true); }
 }
 window.useFrontier = (index) => { const n = window.frontierNotes[index]; $("#frontier-title").value=n.title; $("#frontier-url").value=n.source_url||""; $("#frontier-text").value=n.content; $("#analyze-form").scrollIntoView({behavior:"smooth"}); };
-window.readBilibili = async (index,allowAsr=false) => {const n=window.frontierNotes[index];if(!n)return;busy(true,allowAsr?"正在读取字幕；若确认没有字幕，将调用本地ASR……":"正在读取公开视频字幕；必要时再检查本地授权……");try{const data=await api("/api/bilibili/video/read",{method:"POST",body:JSON.stringify({url:n.source_url,allow_asr:allowAsr})}),r=data.result||{},a=r.analysis||{};n.title=r.title||n.title;n.content=`## 视频导读\n${a.overview||""}\n\n## 转录（${r.data_source||"未知来源"}）\n${r.transcript||""}`;$("#frontier-title").value=n.title;$("#frontier-url").value=r.source_url||n.source_url;$("#frontier-text").value=n.content;$("#analyze-form").scrollIntoView({behavior:"smooth"});const sourceLabels={asr:"本地ASR",ai_subtitle:"B站AI字幕",public_ai_subtitle:"公开AI字幕",public_subtitle:"公开人工字幕",subtitle:"授权字幕"};toast(`视频已解析：${sourceLabels[r.data_source]||r.data_source||"字幕"}，可继续生成教材—前沿卡片`);await loadFrontierNotes()}catch(err){toast(err.message,true);await loadBilibiliMcpStatus()}finally{busy(false)}};
+function formatVideoAnalysis(analysis,result){
+  const a=analysis||{},r=result||{},lines=["## 视频导读",String(a.overview||"已取得转录，尚未生成导读。")];
+  const appendList=(heading,items,formatter)=>{if(!Array.isArray(items)||!items.length)return;lines.push("",`### ${heading}`,...items.map((item,index)=>`${index+1}. ${formatter(item)}`))};
+  appendList("关键点与原文证据",a.key_points,item=>{if(!item||typeof item!=="object")return String(item);const stamp=item.timestamp?`[${item.timestamp}] `:"",evidence=item.evidence?`（原文：${item.evidence}）`:"";return `${stamp}${item.point||item.summary||""}${evidence}`});
+  appendList("章节导览",a.chapter_outline,item=>{if(!item||typeof item!=="object")return String(item);const stamp=item.timestamp?`[${item.timestamp}] `:"";return `${stamp}${item.title||"章节"}${item.summary?`：${item.summary}`:""}`});
+  appendList("核心概念",a.concepts,item=>typeof item==="object"?(item.name||item.concept||JSON.stringify(item)):String(item));
+  appendList("核对提醒",a.caveats,item=>String(item));
+  appendList("继续思考",a.questions,item=>String(item));
+  if(a.coverage?.chunks){lines.push("",`> 导读覆盖：${a.coverage.processed_chunks||0}/${a.coverage.chunks} 个字幕分块；失败 ${a.coverage.failed_chunks||0} 块。`)}
+  lines.push("",`## 转录（${r.data_source||"未知来源"}）`,String(r.transcript||""));
+  return lines.join("\n");
+}
+window.readBilibili = async (index,allowAsr=false) => {if(isPublicMode){toast("B站字幕与 ASR 需桌面连接器；请将字幕粘贴到材料框测试导读。",true);return}const n=window.frontierNotes[index];if(!n)return;busy(true,allowAsr?"正在读取字幕；若确认没有字幕，将调用本地ASR……":"正在读取公开视频字幕；必要时再检查本地授权……");try{const data=await api("/api/bilibili/video/read",{method:"POST",body:JSON.stringify({url:n.source_url,allow_asr:allowAsr})}),r=data.result||{},a=r.analysis||{};n.title=r.title||n.title;n.content=formatVideoAnalysis(a,r);$("#frontier-title").value=n.title;$("#frontier-url").value=r.source_url||n.source_url;$("#frontier-text").value=n.content;$("#analyze-form").scrollIntoView({behavior:"smooth"});const sourceLabels={asr:"本地ASR",ai_subtitle:"B站AI字幕",public_ai_subtitle:"公开AI字幕",public_subtitle:"公开人工字幕",subtitle:"授权字幕"};toast(`视频已解析：${sourceLabels[r.data_source]||r.data_source||"字幕"}，导读与完整转录都已填入，可继续提炼概念`);await loadFrontierNotes()}catch(err){toast(err.message,true);await loadBilibiliMcpStatus()}finally{busy(false)}};
 
 async function loadGarden() {
-  try { const [mindmap, graph, tasks, cards] = await Promise.all([api("/api/mindmap"),api("/api/graph"),api("/api/tasks"),api("/api/cards")]); graphData=graph; drawMindmap(mindmap); renderTasks("#all-tasks",tasks.tasks); $("#all-cards").innerHTML = cards.cards.length ? cards.cards.map(c=>`<div class="mini-card"><b>${escapeHTML(c.concept)}</b><small>${escapeHTML(c.frontier_title)} · ${c.questions.length} 个思考题</small></div>`).join("") : '<div class="empty">还没有对照卡。</div>'; } catch(e){toast(e.message,true)}
+  try { const [mindmap, graph, tasks] = await Promise.all([api("/api/mindmap"),api("/api/graph"),api("/api/tasks")]); graphData=graph; drawMindmap(mindmap); renderTasks("#all-tasks",tasks.tasks); } catch(e){toast(e.message,true)}
 }
 
+function mindmapNodeKey(node){return String(node.id??node.title)}
+function persistMindmapFold(){localStorage.setItem("garden.mindmapCollapsed",JSON.stringify([...mindmapCollapsed]))}
 function drawMindmap(data){
-  const svg=$("#knowledge-graph"),ns="http://www.w3.org/2000/svg",width=1500,centerX=750,colors=["#6c73a8","#d17a43","#4d91a8","#b75f55","#6d9b62","#9b72a8","#c49a3c","#568d7b"];let serial=0;
-  const root=data.tree||{title:"我的知识花园",children:[]};const groups=(root.children||[]).map((node,index)=>({node,side:index%2===0?-1:1,color:colors[index%colors.length]}));svg.style.minWidth="1200px";
-  const leafCount=node=>!node.children?.length?1:node.children.reduce((sum,child)=>sum+leafCount(child),0);const leftLeaves=groups.filter(g=>g.side<0).reduce((s,g)=>s+leafCount(g.node),0);const rightLeaves=groups.filter(g=>g.side>0).reduce((s,g)=>s+leafCount(g.node),0);const height=Math.max(620,Math.max(leftLeaves,rightLeaves)*34+90);svg.style.height=`${height}px`;svg.setAttribute("viewBox",`0 0 ${width} ${height}`);svg.innerHTML="";
+  currentMindmapData=data;
+  const svg=$("#knowledge-graph"),ns="http://www.w3.org/2000/svg",colors=["#6c73a8","#d17a43","#4d91a8","#b75f55","#6d9b62","#9b72a8","#c49a3c","#568d7b"];let serial=0;
+  const root=data.tree||{title:"我的知识花园",children:[]};
+  const visibleChildren=node=>mindmapCollapsed.has(mindmapNodeKey(node))?[]:(node.children||[]);
+  const treeDepth=node=>1+Math.max(0,...visibleChildren(node).map(treeDepth));
+  const maxDepth=Math.max(1,...(root.children||[]).map(treeDepth)),width=Math.max(1500,420+maxDepth*390),centerX=width/2;
+  const groups=(root.children||[]).map((node,index)=>({node,side:index%2===0?-1:1,color:colors[index%colors.length]}));svg.style.minWidth=`${Math.max(1200,width)}px`;
+  const leafCount=node=>!visibleChildren(node).length?1:visibleChildren(node).reduce((sum,child)=>sum+leafCount(child),0);const leftLeaves=groups.filter(g=>g.side<0).reduce((s,g)=>s+leafCount(g.node),0);const rightLeaves=groups.filter(g=>g.side>0).reduce((s,g)=>s+leafCount(g.node),0);const height=Math.max(620,Math.max(leftLeaves,rightLeaves)*34+90);svg.style.height=`${height}px`;svg.setAttribute("viewBox",`0 0 ${width} ${height}`);svg.innerHTML="";
   const records=[],branches=[],firstById=new Map();
-  function place(node,side,depth,yStart,color,parent){const leaves=leafCount(node),span=leaves*34;let childCursor=yStart,childRecords=[];for(const child of (node.children||[])){const placed=place(child,side,depth+1,childCursor,color,null);childRecords.push(placed.record);branches.push({from:null,to:placed.record,color,depth:depth+1});childCursor+=placed.span}const y=childRecords.length?childRecords.reduce((s,r)=>s+r.y,0)/childRecords.length:yStart+span/2;const x=centerX+side*(155+(depth-1)*185);const record={key:`m${serial++}`,node,x,y,color,side,depth};records.push(record);if(typeof node.id==="number"&&!firstById.has(node.id))firstById.set(node.id,record);for(const branch of branches){if(branch.from===null&&childRecords.includes(branch.to))branch.from=record}return{record,span}}
+  function place(node,side,depth,yStart,color,parent){const leaves=leafCount(node),span=leaves*34;let childCursor=yStart,childRecords=[];for(const child of visibleChildren(node)){const placed=place(child,side,depth+1,childCursor,color,null);childRecords.push(placed.record);branches.push({from:null,to:placed.record,color,depth:depth+1});childCursor+=placed.span}const y=childRecords.length?childRecords.reduce((s,r)=>s+r.y,0)/childRecords.length:yStart+span/2;const x=centerX+side*(155+(depth-1)*185);const record={key:`m${serial++}`,node,x,y,color,side,depth};records.push(record);if(typeof node.id==="number"&&!firstById.has(node.id))firstById.set(node.id,record);for(const branch of branches){if(branch.from===null&&childRecords.includes(branch.to))branch.from=record}return{record,span}}
   let leftY=40,rightY=40;const topRecords=[];for(const group of groups){const start=group.side<0?leftY:rightY;const placed=place(group.node,group.side,1,start,group.color,null);topRecords.push({...placed.record,top:true});branches.push({from:{x:centerX,y:height/2},to:placed.record,color:group.color,depth:1});if(group.side<0)leftY+=placed.span+24;else rightY+=placed.span+24}
   // Move each side as a block so its visual center aligns with the root.
   for(const side of [-1,1]){const sideRecords=records.filter(r=>r.side===side);if(!sideRecords.length)continue;const min=Math.min(...sideRecords.map(r=>r.y)),max=Math.max(...sideRecords.map(r=>r.y));const shift=height/2-(min+max)/2;sideRecords.forEach(r=>r.y+=shift)}
   for(const branch of branches){if(branch.from?.key){const actual=records.find(r=>r.key===branch.from.key);if(actual)branch.from=actual}const path=document.createElementNS(ns,"path");const sx=branch.from.x,sy=branch.from.y,tx=branch.to.x,ty=branch.to.y;const bend=(sx+tx)/2;path.setAttribute("d",`M ${sx} ${sy} C ${bend} ${sy}, ${bend} ${ty}, ${tx} ${ty}`);path.setAttribute("fill","none");path.setAttribute("stroke",branch.color);path.setAttribute("stroke-opacity",branch.depth===1?".8":".48");path.setAttribute("stroke-width",branch.depth===1?"5":branch.depth===2?"3":"1.7");path.setAttribute("class","mind-edge");svg.append(path)}
   for(const link of (data.cross_links||[])){if(link.status==="proposed"&&!showProposedCrossLinks)continue;const a=firstById.get(link.source_id),b=firstById.get(link.target_id);if(!a||!b)continue;const path=document.createElementNS(ns,"path");path.setAttribute("d",`M ${a.x} ${a.y} Q ${centerX} ${Math.min(a.y,b.y)-40}, ${b.x} ${b.y}`);path.setAttribute("fill","none");path.setAttribute("stroke","#d68a69");path.setAttribute("stroke-width",link.status==="accepted"?"2":"1.2");if(link.status==="proposed")path.setAttribute("stroke-dasharray","5 6");path.setAttribute("stroke-opacity",link.status==="accepted"?".72":".42");svg.append(path)}
   const rootGroup=document.createElementNS(ns,"g");const rootRect=document.createElementNS(ns,"rect");rootRect.setAttribute("x",centerX-78);rootRect.setAttribute("y",height/2-22);rootRect.setAttribute("width",156);rootRect.setAttribute("height",44);rootRect.setAttribute("rx",12);rootRect.setAttribute("fill","#2e684d");const rootText=document.createElementNS(ns,"text");rootText.setAttribute("x",centerX);rootText.setAttribute("y",height/2+5);rootText.setAttribute("text-anchor","middle");rootText.setAttribute("fill","white");rootText.setAttribute("font-size","15");rootText.setAttribute("font-weight","700");rootText.textContent=root.title;rootGroup.append(rootRect,rootText);svg.append(rootGroup);
-  for(const record of records){const node=record.node,label=node.title||"知识点",boxWidth=Math.max(72,Math.min(190,label.length*12+24)),boxHeight=record.depth===1?32:27;const g=document.createElementNS(ns,"g");g.setAttribute("class","mind-node");g.style.cursor="pointer";const rect=document.createElementNS(ns,"rect");rect.setAttribute("x",record.x-boxWidth/2);rect.setAttribute("y",record.y-boxHeight/2);rect.setAttribute("width",boxWidth);rect.setAttribute("height",boxHeight);rect.setAttribute("rx",record.depth===1?8:5);rect.setAttribute("fill",record.depth===1?record.color:"#fffdf6");rect.setAttribute("stroke",record.color);rect.setAttribute("stroke-width",record.depth===1?"0":"1.4");const text=document.createElementNS(ns,"text");text.setAttribute("x",record.x);text.setAttribute("y",record.y+4);text.setAttribute("text-anchor","middle");text.setAttribute("fill",record.depth===1?"white":"#334b3d");text.setAttribute("font-size",record.depth===1?"12":"10.5");text.setAttribute("font-weight",record.depth<=2?"650":"500");text.textContent=label.length>16?label.slice(0,15)+"…":label;const tip=document.createElementNS(ns,"title");tip.textContent=node.summary||label;g.append(rect,text,tip);g.onclick=()=>showMindNode(node);svg.append(g)}
+  for(const record of records){const node=record.node,label=node.title||"知识点",boxWidth=Math.max(72,Math.min(190,label.length*12+24)),boxHeight=record.depth===1?32:27;const g=document.createElementNS(ns,"g");g.setAttribute("class","mind-node");g.style.cursor="pointer";const rect=document.createElementNS(ns,"rect");rect.setAttribute("x",record.x-boxWidth/2);rect.setAttribute("y",record.y-boxHeight/2);rect.setAttribute("width",boxWidth);rect.setAttribute("height",boxHeight);rect.setAttribute("rx",record.depth===1?8:5);rect.setAttribute("fill",record.depth===1?record.color:"#fffdf6");rect.setAttribute("stroke",record.color);rect.setAttribute("stroke-width",record.depth===1?"0":"1.4");const text=document.createElementNS(ns,"text");text.setAttribute("x",record.x);text.setAttribute("y",record.y+4);text.setAttribute("text-anchor","middle");text.setAttribute("fill",record.depth===1?"white":"#334b3d");text.setAttribute("font-size",record.depth===1?"12":"10.5");text.setAttribute("font-weight",record.depth<=2?"650":"500");text.textContent=label.length>16?label.slice(0,15)+"…":label;const tip=document.createElementNS(ns,"title");tip.textContent=node.summary||label;g.append(rect,text,tip);g.onclick=()=>showMindNode(node);svg.append(g);if((node.children||[]).length){const toggle=document.createElementNS(ns,"g");toggle.setAttribute("class","mind-toggle");toggle.style.cursor="pointer";const tx=record.x+record.side*(boxWidth/2+11),circle=document.createElementNS(ns,"circle"),mark=document.createElementNS(ns,"text");circle.setAttribute("cx",tx);circle.setAttribute("cy",record.y);circle.setAttribute("r","9");circle.setAttribute("fill",mindmapCollapsed.has(mindmapNodeKey(node))?record.color:"#fffdf6");circle.setAttribute("stroke",record.color);circle.setAttribute("stroke-width","1.5");mark.setAttribute("x",tx);mark.setAttribute("y",record.y+3.5);mark.setAttribute("text-anchor","middle");mark.setAttribute("font-size","13");mark.setAttribute("font-weight","700");mark.setAttribute("fill",mindmapCollapsed.has(mindmapNodeKey(node))?"white":record.color);mark.textContent=mindmapCollapsed.has(mindmapNodeKey(node))?"+":"−";toggle.append(circle,mark);toggle.onclick=e=>{e.stopPropagation();const key=mindmapNodeKey(node);mindmapCollapsed.has(key)?mindmapCollapsed.delete(key):mindmapCollapsed.add(key);persistMindmapFold();drawMindmap(currentMindmapData)};svg.append(toggle)}}
 }
 
 async function showMindNode(node){
@@ -570,9 +694,18 @@ async function showMindNode(node){
   const links=related.map(e=>{const other=e.source_id===node.id?byId.get(e.target_id):byId.get(e.source_id);return `<div class="link-audit"><b>关联：${escapeHTML(other?.title||e.target_title)}</b><p>${escapeHTML(relationText(e))}</p></div>`}).join("");
   const pending=[...taskCache.values()].find(t=>t.status==="pending"&&t.concept===node.title);
   const activation=typeof node.knowledge_value==="number"?`<div class="knowledge-activation">知识活跃度 ${Math.round(node.knowledge_value*100)}% · 只影响相关结果排序，不会自动删除</div>`:"";
-  host.innerHTML=`<div class="node-title"><b>${escapeHTML(node.title)}</b><span>${tags||escapeHTML(node.kind||"知识点")}</span></div>${activation}<p class="mind-summary">${escapeHTML(node.summary||"这是知识树中的一个学习节点。")}</p><div class="node-actions">${pending?'<button class="primary" id="node-review">用它复习</button>':""}<button class="secondary" id="node-ask">向园丁追问</button></div>${note?`<div class="node-content">${renderMarkdown(note.content)}</div>`:""}${links}`;
+  host.innerHTML=`<div class="node-title"><b>${escapeHTML(node.title)}</b><span>${tags||escapeHTML(node.kind||"知识点")}</span></div>${activation}<p class="mind-summary">${escapeHTML(node.summary||"这是知识树中的一个学习节点。")}</p><div class="node-actions">${pending?'<button class="primary" id="node-review">用它复习</button>':""}${typeof node.id==="number"?'<button class="primary" id="node-deepdiagram">DeepDiagram 智能展开</button>':""}<button class="secondary" id="node-ask">向园丁追问</button></div><div id="node-smart-map"></div>${note?`<div class="node-content">${renderMarkdown(note.content)}</div>`:""}${links}`;
   if(pending)$("#node-review").onclick=()=>openReview(pending.id);
+  if($("#node-deepdiagram"))$("#node-deepdiagram").onclick=()=>expandMindNode(node,true);
   $("#node-ask").onclick=()=>{switchView("home");$("#agent-ask-input").value=`请解释“${node.title}”的机制、例子和适用边界。`;$("#agent-ask-input").focus()};
+  if((node.children||[]).length&&typeof node.id==="number")expandMindNode(node);
+}
+
+async function expandMindNode(node,force=false){
+  const button=$("#node-deepdiagram"),host=$("#node-smart-map");if(!button||!host)return;
+  const cached=mindmapDiagramCache.get(node.id);if(cached&&!force){host.innerHTML=renderAgentVisualization(cached);button.textContent="重新智能展开";return}
+  button.disabled=true;button.textContent="DeepDiagram 正在整理……";host.innerHTML='<div class="empty">正在把这个分支转换成清晰的局部思维导图，原始分类不会被改写。</div>';
+  try{const data=await api("/api/mindmap/expand",{method:"POST",body:JSON.stringify({node_id:node.id})});const spec=data.result.diagram;mindmapDiagramCache.set(node.id,spec);host.innerHTML=renderAgentVisualization(spec);const label=spec.provider==="deepdiagram-full"?"DeepDiagram 智能展开完成":"完整服务不可用，已显示安全回退图";toast(label)}catch(err){host.innerHTML=`<div class="empty">${escapeHTML(err.message)}</div>`;toast(err.message,true)}finally{button.disabled=false;button.textContent="重新智能展开"}
 }
 
 function drawGraph(data) {
@@ -588,7 +721,11 @@ async function reviewLink(id,accepted){try{await api("/api/links/review",{method
 window.reviewLink=reviewLink;
 
 $$('.nav').forEach(n=>n.onclick=()=>switchView(n.dataset.view)); $$('[data-go]').forEach(n=>n.onclick=()=>switchView(n.dataset.go));
-$("#show-cross-links").checked=showProposedCrossLinks;$("#show-cross-links").onchange=e=>{showProposedCrossLinks=e.target.checked;localStorage.setItem("garden.showProposedCrossLinks",showProposedCrossLinks?"1":"0");if($("#view-garden").classList.contains("active"))loadGarden()};
+$("#nav-more").onclick=()=>{const tools=$("#nav-tools"),open=tools.hidden;tools.hidden=!open;$("#nav-more").setAttribute("aria-expanded",String(open))};
+$("#refresh-growth").onclick=()=>loadGrowth();
+$("#show-cross-links").checked=showProposedCrossLinks;$("#show-cross-links").onchange=e=>{showProposedCrossLinks=e.target.checked;localStorage.setItem(storageKey("showProposedCrossLinks"),showProposedCrossLinks?"1":"0");if($("#view-garden").classList.contains("active"))loadGarden()};
+$("#collapse-mindmap").onclick=()=>{if(!currentMindmapData)return;mindmapCollapsed=new Set((currentMindmapData.tree.children||[]).map(mindmapNodeKey));persistMindmapFold();drawMindmap(currentMindmapData);toast("已收起到学科主干")};
+$("#expand-mindmap").onclick=()=>{mindmapCollapsed.clear();persistMindmapFold();if(currentMindmapData)drawMindmap(currentMindmapData);toast("已展开全部知识层级")};
 $("#refresh-all").onclick=async()=>{try{await bootstrap();toast("花园状态已刷新")}catch(e){toast(e.message,true)}};
 $("#refresh-daily").onclick=()=>loadDaily(true);
 $("#frontier-notify").onclick=async()=>{
@@ -598,7 +735,7 @@ $("#frontier-notify").onclick=async()=>{
 };
 function persistAgentConversation(){
   agentConversation = agentConversation.slice(-AGENT_HISTORY_LIMIT);
-  localStorage.setItem("garden.agentConversation",JSON.stringify(agentConversation));
+  localStorage.setItem(storageKey("agentConversation"),JSON.stringify(agentConversation));
 }
 function renderAgentConversation(){
   const host=$("#agent-answer");
@@ -610,18 +747,28 @@ function renderAgentConversation(){
   host.innerHTML=toolbar+visible.map((message,index)=>{
     if(message.role==="user")return `<div class="chat-turn user-turn"><small>你</small><p>${escapeHTML(withoutEmbeddedMaterial(message.content))}</p></div>`;
     const r=message.result||{};
+    if(message.streaming)return `<div class="chat-turn assistant-turn streaming-turn"><small>园丁正在回答</small>${renderMarkdown(formatGardenerMarkdown(message.content||"正在连接 GLM-5.2……"))}<i class="stream-cursor"></i></div>`;
     const latest=message===agentConversation.at(-1);
     const local=(r.citations||[]).map(c=>`《${escapeHTML(c.title)}》`).join("、")||"本轮沿用对话上下文";
     const online=(r.web_sources||[]).map((s,i)=>`<article class="research-source"><span>在线来源 ${i+1}${s.year?` · ${escapeHTML(s.year)}`:""}</span><a href="${escapeHTML(safeURL(s.url))}" target="_blank" rel="noopener noreferrer">${escapeHTML(s.title)}</a><small>${escapeHTML((s.authors||[]).slice(0,3).join("、")||s.venue||s.source||"")}</small></article>`).join("");
     const wechat=(r.wechat_sources||[]).map((s,i)=>`<article class="research-source"><span>授权微信依据 ${i+1}</span><b>${escapeHTML(s.title||s.talker||"本轮聊天片段")}</b><small>命中 ${escapeHTML(s.message_count||0)} 条 · ${escapeHTML(s.boundary||"")}</small></article>`).join("");
     const prompts=(r.discussion_prompts||[]).map(q=>`<button class="secondary discuss-prompt" type="button" data-prompt="${escapeHTML(q)}">${escapeHTML(q)}</button>`).join("");
+    const normalizedAnswer=String(message.content||"").replace(/\s+/g," ").trim();
+    const rawFollowup=String(r.followup||"").trim();
+    const followup=rawFollowup.replace(/\s+/g," ").trim()===normalizedAnswer?"":rawFollowup;
+    const nextQuestions=(followup||prompts)?`<div class="questions"><b>继续想一步</b>${followup?`<p>${escapeHTML(followup)}</p>`:""}${prompts}</div>`:"";
     const saveAction=(r.wechat_sources||[]).length?'<button id="review-wechat-evidence" class="primary" type="button">打开微信苗圃审核原文</button>':'<button id="save-agent-insight" class="primary" type="button">沉淀并更新知识图谱</button>';
     const p=r.personalization||{};
+    const answerMode=r.answer_mode==="direct_model"
+      ? '<span class="status-badge on">GLM-5.2 直答</span>'
+      : '<span class="status-badge">知识花园增强</span>';
+    const latency=Number(r.latency_seconds||0);
+    const latencyLabel=latency>0?`<span class="answer-latency">本轮 ${latency.toFixed(1)} 秒</span>`:"";
     const statusLabels={applied:"已采用可信个性化",light:"仅轻量参考",standard:"标准讲解",disabled_first_exposure:"首次概览不个性化"};
     const personalizationEvidence=(p.evidence||[]).slice(0,4).map(item=>`<li><span>${escapeHTML(item.observation||"可追溯学习证据")}</span><small>${escapeHTML(item.evidence_id||"")} · 权重 ${Math.round(Number(item.weight||0)*100)}%</small></li>`).join("");
-    const personalization=`<details class="personalization-audit"><summary>为什么这次这样讲 · ${escapeHTML(statusLabels[p.status]||"标准讲解")}${p.confidence?` ${Math.round(Number(p.confidence)*100)}%`:""}</summary><div><p>${escapeHTML(p.strategy_summary||p.fallback_reason||"本轮没有使用未经确认的画像判断。")}</p>${personalizationEvidence?`<ol>${personalizationEvidence}</ol>`:"<p class=\"muted\">没有足够相关证据，因此未启用个性化。</p>"}${r.request_id?`<div class="personalization-feedback"><span>这个讲法适合你吗？</span><button class="text-btn personalization-vote" data-request-id="${escapeHTML(r.request_id)}" data-helpful="true" type="button">适合</button><button class="text-btn personalization-vote" data-request-id="${escapeHTML(r.request_id)}" data-helpful="false" type="button">不适合</button></div>`:""}</div></details>`;
+    const personalization=`<details class="personalization-audit"><summary>为什么这次这样讲 · ${escapeHTML(statusLabels[p.status]||"标准讲解")}${p.confidence?` ${Math.round(Number(p.confidence)*100)}%`:""}</summary><div><p>${escapeHTML(p.strategy_summary||p.fallback_reason||"本轮没有使用未经确认的画像判断。")}</p>${personalizationEvidence?`<ol>${personalizationEvidence}</ol>`:"<p class=\"muted\">没有足够相关证据，因此未启用个性化。</p>"}${r.request_id?`<div class="personalization-feedback"><span>这个讲法适合你吗？</span><button class="text-btn personalization-vote" data-request-id="${escapeHTML(r.request_id)}" data-helpful="true" type="button">适合</button><button class="text-btn personalization-vote" data-request-id="${escapeHTML(r.request_id)}" data-helpful="false" type="button">不适合，换种讲法</button><form class="personalization-rewrite" data-request-id="${escapeHTML(r.request_id)}" hidden><label>希望怎样重讲上一题，或纠正问题对象？</label><textarea rows="2" maxlength="500" required placeholder="例如：少用术语；或：我问的是心理学中的人模型"></textarea><div><button class="primary" type="submit">重新回答</button><button class="text-btn cancel-rewrite" type="button">取消</button></div><small>系统会先区分讲解方式、问题纠正、范围补充和事实质疑，再决定是否重新检索。</small></form></div>`:""}</div></details>`;
     const planner=renderPlannerAudit(r),visual=renderAgentVisualization(r.visualization||{});
-    return `<div class="chat-turn assistant-turn"><small>园丁</small>${renderMarkdown(formatGardenerMarkdown(message.content))}${visual}<div class="sources">依据层：${escapeHTML(r.evidence_layer||"对话")} · 本地：${local}</div>${planner}${personalization}${online?`<div class="online-research"><b>为你找到的延伸阅读</b>${online}</div>`:""}${wechat?`<div class="online-research"><b>本轮授权读取的微信依据</b>${wechat}</div>`:""}${latest?`<div class="questions"><b>继续想一步</b><p>${escapeHTML(r.followup||"")}</p>${prompts}</div><div class="agent-decisions"><span>这段对话要怎样继续生长？</span>${saveAction}<button id="continue-agent-talk" class="secondary" type="button">继续讨论</button><button id="new-agent-talk" class="text-btn" type="button">开始新话题</button></div>`:""}</div>`;
+    return `<div class="chat-turn assistant-turn"><small>园丁 · ${answerMode}${latencyLabel}</small>${renderMarkdown(formatGardenerMarkdown(message.content))}${visual}<div class="sources">依据层：${escapeHTML(r.evidence_layer||"对话")} · 本地：${local}</div>${planner}${personalization}${online?`<div class="online-research"><b>为你找到的延伸阅读</b>${online}</div>`:""}${wechat?`<div class="online-research"><b>本轮授权读取的微信依据</b>${wechat}</div>`:""}${latest?`${nextQuestions}<div class="agent-decisions"><span>这段对话要怎样继续生长？</span>${saveAction}<button id="continue-agent-talk" class="secondary" type="button">继续讨论</button><button id="new-agent-talk" class="text-btn" type="button">开始新话题</button></div>`:""}</div>`;
   }).join("");
   $("#toggle-agent-history")?.addEventListener("click",()=>{agentHistoryExpanded=!agentHistoryExpanded;renderAgentConversation()});
   $("#clear-agent-history")?.addEventListener("click",startNewAgentConversation);
@@ -631,35 +778,138 @@ function renderAgentConversation(){
   $("#new-agent-talk")?.addEventListener("click",startNewAgentConversation);
   $$('.discuss-prompt').forEach(button=>button.onclick=()=>continueAgentDiscussion(button.dataset.prompt));
   $$('.personalization-vote').forEach(button=>button.onclick=()=>submitPersonalizationFeedback(button,button.dataset.helpful==="true"));
+  $$('.personalization-rewrite').forEach(form=>form.onsubmit=event=>submitPersonalizationReanswer(event,form));
+  $$('.cancel-rewrite').forEach(button=>button.onclick=()=>{button.closest('.personalization-rewrite').hidden=true});
+  if(!agentConversation.some(item=>item.streaming))typesetMath(host);
+}
+
+function growthStageLabel(stage="exposed"){
+  return ({exposed:"初次接触",recognition:"能识别",explanation:"能解释",application:"能应用",transfer:"能迁移"})[stage]||stage;
+}
+
+async function loadGrowth(){
+  const masteryHost=$("#growth-mastery-list"),patternHost=$("#growth-pattern-list"),claimHost=$("#growth-claim-list");
+  try{
+    const data=await api("/api/memory"),experience=data.experience_memory||{},mastery=data.concept_mastery||[],claims=experience.claims||[],profile=experience.l3_profile_graph||{};
+    const activeClaims=claims.filter(item=>item.status==="active");
+    const now=Date.now(),due=mastery.filter(item=>item.next_review_at&&new Date(item.next_review_at).getTime()<=now);
+    $("#growth-events").textContent=Number(experience.l1_event_count||0);
+    $("#growth-claims").textContent=activeClaims.length;
+    $("#growth-mastery").textContent=mastery.length;
+    $("#growth-due").textContent=due.length;
+    masteryHost.innerHTML=mastery.length?mastery.map(item=>{
+      const score=Math.round(Number(item.confidence||0)*100),retention=Math.round(Number(item.retention??1)*100),next=item.next_review_at?new Date(item.next_review_at).toLocaleDateString("zh-CN"):"待更多证据",strength=Math.max(4,Math.min(100,Math.round(score*.55+retention*.45)));
+      return `<article class="mastery-card"><header><div><b>${escapeHTML(item.concept_key||"未命名概念")}</b><span>${escapeHTML(growthStageLabel(item.stage))}</span></div><strong>${strength}%</strong></header><div class="mastery-bar" aria-label="当前学习强度 ${strength}%"><i style="width:${strength}%"></i></div><footer><span><small>掌握置信</small>${score}%</span><span><small>当前保持</small>${retention}%</span><span><small>建议复习</small>${escapeHTML(next)}</span></footer></article>`;
+    }).join(""):'<div class="empty">完成一次有答案的复习后，才会建立掌握度。</div>';
+    const patterns=profile.applicable_patterns||profile.patterns||[];
+    patternHost.innerHTML=patterns.length?patterns.map(item=>`<div class="mini-card"><b>${escapeHTML(item.claim||item.claim_text||item.label||"稳定模式")}</b><small>置信 ${Math.round(Number(item.effective_confidence||item.confidence||0)*100)}% · ${escapeHTML((item.contexts||[]).join("、")||"跨会话证据")}</small></div>`).join(""):'<div class="empty">还没有跨会话稳定模式，系统不会根据一次表现给你贴标签。</div>';
+    claimHost.innerHTML=claims.length?claims.map(item=>`<div class="source-item"><div><b>${escapeHTML(item.claim_text||"记忆假设")}</b><small>L${Number(item.layer||1)} · ${escapeHTML(item.dimension||"学习经验")} · ${escapeHTML(item.scope_type||"global")}:${escapeHTML(item.scope_key||"all")} · 置信 ${Math.round(Number(item.confidence||0)*100)}%</small></div><span class="status-badge ${item.status==="active"?"on":""}">${escapeHTML(item.status==="active"?"有效":"已降级")}</span></div>`).join(""):'<div class="empty">记忆需要多次事件或你的明确反馈才会形成。</div>';
+  }catch(err){toast(`成长档案读取失败：${err.message}`,true)}
 }
 async function submitPersonalizationFeedback(button,helpful){
   const requestId=button.dataset.requestId;if(!requestId)return;
+  if(!helpful){
+    const form=button.closest('.personalization-feedback')?.querySelector('.personalization-rewrite');
+    if(form){form.hidden=false;form.querySelector('textarea')?.focus()}
+    return;
+  }
   button.closest('.personalization-feedback')?.querySelectorAll('button').forEach(item=>item.disabled=true);
   try{
     const data=await api('/api/agent/personalization-feedback',{method:'POST',body:JSON.stringify({request_id:requestId,helpful})});
     toast(data.result.message||'已记录你的反馈');
-    if(!helpful){const input=$("#agent-ask-input");input.value="这次讲解方式不适合我。我希望你改成：";input.focus()}
   }catch(err){button.closest('.personalization-feedback')?.querySelectorAll('button').forEach(item=>item.disabled=false);toast(err.message,true)}
 }
-$("#agent-ask-form").onsubmit=async e=>{e.preventDefault();const input=$("#agent-ask-input"),question=input.value.trim();if(!question)return;const history=agentConversation.map(item=>({role:item.role,content:item.content,evidence_layer:item.result?.evidence_layer||null})).slice(-10);agentConversation.push({role:"user",content:question});input.value="";persistAgentConversation();renderAgentConversation();busy(true,"知识园丁正在理解这段对话，必要时检索新证据……");try{const data=await api("/api/agent/ask",{method:"POST",body:JSON.stringify({question,history,session_id:agentSessionId})});const r=data.result;agentSessionId=r.session_id||agentSessionId;localStorage.setItem("garden.agentSessionId",agentSessionId);lastAgentExchange={question,...r};agentConversation.push({role:"assistant",content:r.answer,result:r});persistAgentConversation();renderAgentConversation()}catch(err){agentConversation.pop();persistAgentConversation();renderAgentConversation();toast(err.message,true)}finally{busy(false)}};
-async function saveAgentInsight(){if(!lastAgentExchange||!agentConversation.length)return;busy(true,"正在把整段推导编译成知识点并重新嫁接思维导图……");try{const assistants=agentConversation.filter(item=>item.role==="assistant"&&item.result);const citations=assistants.flatMap(item=>item.result.citations||[]).filter((item,index,all)=>all.findIndex(other=>other.id===item.id)===index);const webSources=assistants.flatMap(item=>item.result.web_sources||[]).filter((item,index,all)=>all.findIndex(other=>other.url===item.url)===index);const firstQuestion=agentConversation.find(item=>item.role==="user")?.content||lastAgentExchange.question;const data=await api("/api/agent/save",{method:"POST",body:JSON.stringify({question:firstQuestion,answer:lastAgentExchange.answer,citations,web_sources:webSources,followup:lastAgentExchange.followup,messages:agentConversation.map(item=>({role:item.role,content:item.content}))})});toast(`已沉淀“${data.result.concept_title}”，知识库和思维导图已更新 +8 XP`);$("#save-agent-insight").disabled=true;$("#save-agent-insight").textContent="已沉淀";await bootstrap();await loadGarden()}catch(err){toast(err.message,true)}finally{busy(false)}}
-function continueAgentDiscussion(prompt){const input=$("#agent-ask-input");input.value=prompt||"";input.focus();toast("参考方向已放入输入框，你可以修改或完全换成自己的问题")}
-function startNewAgentConversation(){agentConversation=[];lastAgentExchange=null;agentHistoryExpanded=false;agentSessionId=crypto.randomUUID();localStorage.setItem("garden.agentSessionId",agentSessionId);persistAgentConversation();renderAgentConversation();$("#agent-ask-input").focus()}
+async function submitPersonalizationReanswer(event,form){
+  event.preventDefault();
+  const requestId=form.dataset.requestId,note=form.querySelector('textarea')?.value.trim();
+  if(!requestId||!note)return;
+  const history=agentConversation.map(item=>({role:item.role,content:item.content,evidence_layer:item.result?.evidence_layer||null})).slice(-10);
+  form.querySelectorAll('button,textarea').forEach(item=>item.disabled=true);
+  busy(true,"园丁正在判断你是要换讲法、纠正问题，还是补充范围……");
+  try{
+    const data=await api('/api/agent/reanswer',{method:'POST',body:JSON.stringify({request_id:requestId,feedback_note:note,history})});
+    const r=data.result;
+    agentSessionId=r.session_id||agentSessionId;
+    localStorage.setItem(storageKey("agentSessionId"),agentSessionId);
+    const feedbackType=r.reanswer?.feedback_type||"STYLE_CHANGE";
+    const feedbackLabels={STYLE_CHANGE:"换一种讲法",INTENT_CORRECTION:"纠正问题",SCOPE_CHANGE:"补充范围",FACTUAL_CHALLENGE:"质疑上一回答"};
+    const feedbackLabel=feedbackLabels[feedbackType]||"修正要求";
+    const canonicalQuestion=r.reanswer?.revised_question||r.reanswer?.original_question||lastAgentExchange?.question||"";
+    agentConversation.push({role:"user",content:`${feedbackLabel}：${note}`,kind:"reanswer_feedback",feedbackType,canonicalQuestion});
+    agentConversation.push({role:"assistant",content:r.answer,result:r});
+    agentConversation=agentConversation.slice(-AGENT_HISTORY_LIMIT);
+    lastAgentExchange={question:canonicalQuestion,...r};
+    persistAgentConversation();renderAgentConversation();
+    toast(`已按“${feedbackLabel}”重新回答`);
+  }catch(err){
+    form.querySelectorAll('button,textarea').forEach(item=>item.disabled=false);
+    toast(err.message,true);
+  }finally{busy(false)}
+}
+$("#agent-ask-form").onsubmit=async e=>{
+  e.preventDefault();const input=$("#agent-ask-input"),question=input.value.trim();if(!question)return;
+  const history=agentConversation.map(item=>({role:item.role,content:item.content,evidence_layer:item.result?.evidence_layer||null})).slice(-10);
+  agentConversation.push({role:"user",content:question},{role:"assistant",content:"",streaming:true});input.value="";renderAgentConversation();
+  let scheduled=false;const schedule=()=>{if(scheduled)return;scheduled=true;requestAnimationFrame(()=>{scheduled=false;renderAgentConversation()})};
+  try{
+    const response=await fetch("/api/agent/stream",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question,history,session_id:agentSessionId})});
+    if(!response.ok)throw new Error(`请求失败（${response.status}）`);
+    const reader=response.body.getReader(),decoder=new TextDecoder();let buffer="",finalResult=null;
+    while(true){const {value,done}=await reader.read();buffer+=decoder.decode(value||new Uint8Array(),{stream:!done});const lines=buffer.split("\n");buffer=lines.pop()||"";for(const line of lines){if(!line.trim())continue;const event=JSON.parse(line);if(event.type==="delta"){agentConversation.at(-1).content+=event.text;schedule()}else if(event.type==="result")finalResult=event.result;else if(event.type==="error")throw new Error(event.error||"回答失败")}if(done)break}
+    if(!finalResult)throw new Error("回答连接提前结束，请重试");const r=finalResult;agentSessionId=r.session_id||agentSessionId;localStorage.setItem(storageKey("agentSessionId"),agentSessionId);lastAgentExchange={question,...r};agentConversation[agentConversation.length-1]={role:"assistant",content:r.answer,result:r};persistAgentConversation();renderAgentConversation();
+  }catch(err){agentConversation.splice(-2);persistAgentConversation();renderAgentConversation();toast(err.message,true)}
+};
+async function saveAgentInsight(){if(!lastAgentExchange||!agentConversation.length)return;busy(true,"正在把整段推导编译成知识点并重新嫁接思维导图……");try{const assistants=agentConversation.filter(item=>item.role==="assistant"&&item.result);const citations=assistants.flatMap(item=>item.result.citations||[]).filter((item,index,all)=>all.findIndex(other=>other.id===item.id)===index);const webSources=assistants.flatMap(item=>item.result.web_sources||[]).filter((item,index,all)=>all.findIndex(other=>other.url===item.url)===index);const firstQuestion=agentConversation.find(item=>item.role==="user"&&!item.kind)?.content||lastAgentExchange.question;const canonicalQuestion=lastAgentExchange.reanswer?.revised_question||lastAgentExchange.question||firstQuestion;const data=await api("/api/agent/save",{method:"POST",body:JSON.stringify({question:canonicalQuestion,answer:lastAgentExchange.answer,citations,web_sources:webSources,followup:lastAgentExchange.followup,messages:agentConversation.map(item=>({role:item.role,content:item.content}))})});toast(`已沉淀“${data.result.concept_title}”，知识库和思维导图已更新 +8 XP`);$("#save-agent-insight").disabled=true;$("#save-agent-insight").textContent="已沉淀";await bootstrap();await loadGarden()}catch(err){toast(err.message,true)}finally{busy(false)}}
+function continueAgentDiscussion(prompt){
+  const input=$("#agent-ask-input"),assistantPrompt=String(prompt||"").trim();
+  input.value="";
+  input.placeholder=assistantPrompt?`园丁刚才问：${assistantPrompt} —— 请写下你自己的回应`:`写下你自己的想法继续讨论……`;
+  input.focus();
+  toast("园丁的问题只作为提示保留，不会冒充成你说的话");
+}
+function startNewAgentConversation(){agentConversation=[];lastAgentExchange=null;agentHistoryExpanded=false;agentSessionId=crypto.randomUUID();localStorage.setItem(storageKey("agentSessionId"),agentSessionId);persistAgentConversation();renderAgentConversation();const input=$("#agent-ask-input");input.value="";input.placeholder="写下你想真正弄清的问题……";input.focus()}
 $("#agent-patrol").onclick=async()=>{busy(true,"知识园丁正在巡视 raw、Wiki 和 AGENTS.md……");try{const data=await api("/api/agent/patrol",{method:"POST",body:"{}"});toast(`巡视完成：主动编译 ${data.result.ingested.length} 份资料，AGENTS.md 已同步`);await bootstrap();if($("#view-garden").classList.contains("active"))await loadGarden()}catch(err){toast(err.message,true)}finally{busy(false)}};
+async function waitForFrontierAnalysis(jobId){
+  let transientFailures=0;
+  for(let attempt=0;attempt<360;attempt++){
+    await new Promise(resolve=>setTimeout(resolve,1000));
+    try{
+      const data=await api(`/api/analyze/jobs?job_id=${encodeURIComponent(jobId)}`),job=data.job||{};
+      transientFailures=0;busy(true,job.message||"正在生成导读卡……");
+      if(job.status==="complete")return job.result;
+      if(job.status==="failed"){const failure=new Error(job.error||job.message||"导读任务失败");failure.terminal=true;throw failure}
+    }catch(err){
+      if(err.terminal)throw err;
+      transientFailures++;
+      if(transientFailures>=8)throw new Error("公开网络连续中断，任务可能仍在后台运行；请稍后刷新前沿雷达查看已保存材料。");
+    }
+  }
+  throw new Error("导读任务超过 6 分钟，输入内容仍保留在页面上。");
+}
+function renderFrontierAnalysisResult(result){
+  const guide=result.guide||{},chapters=guide.chapter_outline||[],points=guide.key_points||[],concepts=result.concepts||guide.concepts||[],caveats=guide.caveats||[],questions=guide.questions||[];
+  const itemText=item=>typeof item==="string"?item:String(item?.point||item?.title||item?.name||item?.summary||"");
+  const evidence=item=>typeof item==="object"&&item?String(item.evidence||item.summary||item.boundary||""):"";
+  const timestamp=item=>typeof item==="object"&&item?String(item.timestamp||""):"";
+  $("#analysis-result").innerHTML=`<h2 class="result-heading">GLM 深度导读</h2><article class="bridge-card deep-guide"><h3>这段材料在讲什么</h3><div class="markdown">${renderMarkdown(guide.overview||"")}</div>${chapters.length?`<h3>章节与观看路线</h3><ol>${chapters.map(item=>`<li>${timestamp(item)?`<b>[${escapeHTML(timestamp(item))}]</b> `:""}${escapeHTML(itemText(item))}${evidence(item)?`：${escapeHTML(evidence(item))}`:""}</li>`).join("")}</ol>`:""}${points.length?`<h3>核心论点与原文证据</h3><ol>${points.map(item=>`<li>${timestamp(item)?`<b>[${escapeHTML(timestamp(item))}]</b> `:""}${escapeHTML(itemText(item))}${evidence(item)?`<blockquote>${escapeHTML(evidence(item))}</blockquote>`:""}</li>`).join("")}</ol>`:""}${concepts.length?`<h3>值得掌握的概念</h3><div class="chips">${concepts.map(item=>`<span class="chip">${escapeHTML(typeof item==="string"?item:item?.name||"")}</span>`).join("")}</div>`:""}${caveats.length?`<h3>字幕与结论边界</h3><ul>${caveats.map(item=>`<li>${escapeHTML(itemText(item))}</li>`).join("")}</ul>`:""}${questions.length?`<div class="questions"><b>继续思考</b><ol>${questions.map(item=>`<li>${escapeHTML(itemText(item))}</li>`).join("")}</ol></div>`:""}</article><article class="panel analysis-saved"><b>原材料与深度导读已保存</b><p>可以从“前沿雷达 → 最新前沿种子”重新打开；系统不再自动生成知识卡片。</p><div class="button-row"><button id="open-analysis-garden" class="primary" type="button">去知识树查看</button><button id="open-analysis-history" class="secondary" type="button">查看已保存材料</button></div></article>`;
+  $("#open-analysis-garden")?.addEventListener("click",()=>switchView("garden"));
+  $("#open-analysis-history")?.addEventListener("click",async()=>{await loadFrontierNotes();$("#frontier-notes")?.scrollIntoView({behavior:"smooth"})});
+  $("#analysis-result")?.scrollIntoView({behavior:"smooth",block:"start"});
+}
 $("#analyze-form").onsubmit=async e=>{
   e.preventDefault();
   const form=e.currentTarget;
-  busy(true,"正在把前沿新枝嫁接到教材……");
+  busy(true,"正在创建可恢复的导读任务……");
   try{
-    const data=await api("/api/analyze",{method:"POST",body:JSON.stringify({
+    const queued=await api("/api/analyze/jobs",{method:"POST",body:JSON.stringify({
       title:$("#frontier-title").value,
       url:$("#frontier-url").value,
       text:$("#frontier-text").value
     })});
-    const cards=data.result.cards;
-    $("#analysis-result").innerHTML='<h2 class="result-heading">新绽放的对照卡</h2>'+cards.map(c=>`<article class="bridge-card"><h3>✿ ${escapeHTML(c.concept)}</h3><div class="markdown">${renderMarkdown(c.explanation)}</div><div class="questions"><b>园丁追问</b><ol>${c.questions.map(q=>`<li>${escapeHTML(q)}</li>`).join("")}</ol></div></article>`).join("");
+    const result=await waitForFrontierAnalysis(queued.job.job_id);
+    renderFrontierAnalysisResult(result);
     form.reset();
-    toast(`已生成 ${cards.length} 张对照卡，并已嫁接到知识树；输入区已清空`);
+    toast("GLM 深度导读已完成，原文与时间戳证据均已保存");
     await bootstrap();
     if($("#view-garden").classList.contains("active"))await loadGarden()
   }catch(err){
@@ -705,7 +955,7 @@ async function loadBilibiliMcpStatus(){
   }catch(err){host.innerHTML=`<b>Bilibili MCP · 状态检查失败</b><span>${escapeHTML(err.message)}</span>`}
 }
 function inspirationText(result){result.branches=normalizeInspirationBranches(result.branches);return String(result.answer||[result.acknowledgement,...(result.claims||[]).map(claim=>claim.text),result.counter_view].filter(Boolean).join("\n\n")).trim()}
-function persistInspiration(){localStorage.setItem("garden.inspirationConversation",JSON.stringify(inspirationConversation.slice(-20)));localStorage.setItem("garden.inspirationSessionId",inspirationSessionId)}
+function persistInspiration(){localStorage.setItem(storageKey("inspirationConversation"),JSON.stringify(inspirationConversation.slice(-20)));localStorage.setItem(storageKey("inspirationSessionId"),inspirationSessionId)}
 function renderInspiration(){
   const host=$("#capture-result");if(!inspirationConversation.length){host.innerHTML="";return}
   const turns=inspirationConversation.map(m=>{
@@ -716,7 +966,7 @@ function renderInspiration(){
   }).join("");
   const branches=(latestInspiration?.branches||[]).map(b=>`<button class="secondary inspiration-branch" type="button" data-question="${escapeHTML(b.question)}">${escapeHTML(b.title)}：${escapeHTML(b.question)}</button>`).join("");
   host.innerHTML=`<article class="panel inspiration-dialogue"><div class="mode-banner">💡 灵感模式 · 自由思辨，假设不会进入掌握度；你确认的同类推理表达偏好会保留</div>${turns}<div class="inspiration-routes"><b>可以继续深入的方向</b>${branches}</div><form id="inspiration-followup-form"><textarea id="inspiration-followup" rows="4" placeholder="继续写你自己的想法、质疑或新方向……"></textarea><button class="primary" type="submit">继续自由讨论</button></form><div class="agent-decisions"><button id="save-inspiration" class="secondary" type="button">保存未核验灵感种子</button><button id="investigate-inspiration" class="primary" type="button">建立中立领域概览</button><button id="verify-inspiration" class="secondary" type="button">只核验当前假设</button><button id="new-inspiration" class="text-btn" type="button">开始新灵感</button></div></article>`;
-  $$('.inspiration-branch').forEach(button=>button.onclick=()=>{const input=$("#inspiration-followup");input.value=button.dataset.question;input.focus();toast("路标已填入，你可以任意修改后再发送")});
+  $$('.inspiration-branch').forEach(button=>button.onclick=()=>{const input=$("#inspiration-followup"),question=button.dataset.question||"";input.value="";input.placeholder=question?`灵感伙伴刚才建议：${question} —— 请写下你自己的回应`:`继续写你自己的想法……`;input.focus();toast("灵感伙伴的路标只作为提示，不会冒充成你说的话")});
   $$('.inspiration-vote').forEach(button=>button.onclick=()=>submitInspirationFeedback(button,button.dataset.helpful==="true"));
   $("#inspiration-followup-form").onsubmit=e=>{e.preventDefault();sendInspiration($("#inspiration-followup").value)};$("#save-inspiration").onclick=saveInspiration;$("#investigate-inspiration").onclick=()=>investigateInspiration("overview");$("#verify-inspiration").onclick=()=>investigateInspiration("verify");$("#new-inspiration").onclick=()=>{inspirationConversation=[];latestInspiration=null;inspirationSessionId=crypto.randomUUID();persistInspiration();renderInspiration();$("#capture-content").focus()}
 }
@@ -792,7 +1042,12 @@ $("#refresh-feeds").onclick=async()=>{
 $("#copy-report").onclick=async()=>{const r=state.report;const text=`${r.title}\n\n${r.insight}\n\n新概念：${(r.new_concepts||[]).join("、")}\n下一步：${(r.next_actions||[]).join("；")}`;try{await navigator.clipboard.writeText(text);toast("周报已复制")}catch(e){toast("浏览器没有允许复制",true)}};
 
 const hour=new Date().getHours();$("#page-title").textContent=`${hour<11?"早上":hour<18?"下午":"晚上"}好，园丁`;$("#today-label").textContent=new Intl.DateTimeFormat("zh-CN",{month:"long",day:"numeric",weekday:"long"}).format(new Date());
-const restoredAssistant=[...agentConversation].reverse().find(item=>item.role==="assistant"&&item.result);const restoredQuestion=agentConversation.find(item=>item.role==="user")?.content;if(restoredAssistant)lastAgentExchange={question:restoredQuestion,...restoredAssistant.result};renderAgentConversation();
-const restoredInspiration=[...inspirationConversation].reverse().find(item=>item.role==="assistant"&&item.result);if(restoredInspiration){latestInspiration=restoredInspiration.result;latestInspiration.branches=normalizeInspirationBranches(latestInspiration.branches)}renderInspiration();
-bootstrap().catch(e=>toast(`启动失败：${e.message}`,true));
-setInterval(()=>loadDaily(false),15*60*1000);
+$("#auth-form").onsubmit=event=>{event.preventDefault();performAuth("login")};
+$("#auth-register").onclick=()=>performAuth("register");
+$("#auth-logout").onclick=async()=>{try{await api(isBetaDesktop?"/api/beta/logout":"/api/auth/logout",{method:"POST",body:"{}"});location.reload()}catch(err){toast(err.message,true)}};
+$("#improvement-consent").onchange=async event=>{
+  const requested=event.target.checked;event.target.disabled=true;
+  try{await api("/api/improvement/consent",{method:"POST",body:JSON.stringify({consent:requested})});await loadImprovementStatus();toast(requested?"已开启脱敏评测贡献":"已停止将后续问题加入评测池")}
+  catch(err){event.target.checked=!requested;toast(err.message,true)}finally{event.target.disabled=false}
+};
+initializeApplication().catch(e=>toast(`启动失败：${e.message}`,true));

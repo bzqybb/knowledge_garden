@@ -12,6 +12,7 @@ from core.credentials import load_secret
 LEGACY_KEY_PATH = RUNTIME_DIR / "kimi-eval-api-key.dpapi"
 GLM_KEY_PATH = RUNTIME_DIR / "glm-eval-api-key.dpapi"
 DEEPSEEK_KEY_PATH = RUNTIME_DIR / "deepseek-eval-api-key.dpapi"
+GLM_GENERATOR_KEY_PATH = RUNTIME_DIR / "glm-generator-api-key.dpapi"
 DEFAULT_MODEL = "deepseek-v4-pro"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 GLM_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
@@ -25,6 +26,8 @@ def judge_api_key(model: str | None = None) -> str:
     if generic:
         return generic
     if selected.startswith("glm-"):
+        if os.getenv("JUDGE_USE_GENERATOR_CREDENTIAL", "").strip().lower() in {"1", "true", "yes", "on"}:
+            return load_secret(GLM_GENERATOR_KEY_PATH).strip()
         for name in ("GLM_API_KEY", "ZHIPU_API_KEY", "BIGMODEL_API_KEY"):
             value = os.getenv(name, "").strip()
             if value:
@@ -86,6 +89,15 @@ def judge_label(model: str | None = None) -> str:
     return f"腾讯云 TokenHub（{selected}）"
 
 
+def judge_independence(model: str | None = None) -> str:
+    selected = model or judge_model()
+    if selected.startswith("glm-") and os.getenv("JUDGE_USE_GENERATOR_CREDENTIAL", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return "same_provider_and_credential_lane_as_generator"
+    if selected.startswith("glm-"):
+        return "same_provider_separate_credential_lane"
+    return "heterogeneous_provider"
+
+
 def judge_request_options(model: str | None = None) -> dict[str, object]:
     """Use concise non-thinking JSON judging when the provider supports it."""
     selected = model or judge_model()
@@ -97,9 +109,7 @@ def judge_request_options(model: str | None = None) -> dict[str, object]:
     # the generic evaluator default (0.2) yields HTTP 400 before any scoring.
     if selected == "kimi-k3" and "JUDGE_TEMPERATURE" not in os.environ:
         options["temperature"] = 1.0
-    if selected in {"kimi-k2.6", "kimi-k2.5"} or (
-        selected.startswith("deepseek-v4") and selected not in {"deepseek-v4-pro", "deepseek-v4-flash"}
-    ):
+    if selected in {"kimi-k2.6", "kimi-k2.5"} or selected.startswith("deepseek-v4"):
         thinking = os.getenv("JUDGE_THINKING", "disabled").strip().lower()
         if thinking not in {"enabled", "disabled"}:
             thinking = "disabled"

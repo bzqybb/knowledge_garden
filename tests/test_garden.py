@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,7 +10,7 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from core.agent import answer_from_wiki, briefing, daily_digest, patrol_vault, save_agent_insight, update_agents_manifest
+from core.agent import answer_from_wiki, briefing, classify_reanswer_feedback, daily_digest, patrol_vault, reanswer_with_feedback, save_agent_insight, update_agents_manifest
 from core.compiler import ingest_raw, validate_links
 from core.context import ChatMessage, GardenContext, KnowledgeScope, LearnerSettings, ToolPolicy
 from core.context_builder import ContextBuilder
@@ -31,12 +32,19 @@ from core.gardener_graph import (
     _explicit_academic_concepts,
     _fallback_planner,
     _fallback_wechat_lookup,
+    _is_stable_educational_request,
+    _META_REFUSAL_LANGUAGE,
     _question_subject,
     _response_profile,
+    _requires_authority_lookup,
+    _requires_local_knowledge_lookup,
     _requires_claim_level_audit,
     _requests_wechat_history,
     _scientific_premise_guard,
     _wechat_time_params,
+    _wikipedia_preference,
+    ask_clarification,
+    assemble_result,
     audit_evidence,
     choose_teaching_strategy,
     generate_answer,
@@ -44,14 +52,17 @@ from core.gardener_graph import (
     generate_visualization,
     plan_sources,
     planner_plan,
+    prepare_retrieval_retry,
     retrieve_sources,
+    route_after_personalization,
+    route_after_evidence_audit,
     route_after_planner,
     understand_question,
     repair_outputs,
     review_answer,
 )
 from core.inspiration import explore_inspiration, save_inspiration_seed
-from core.mindmap import build_mindmap
+from core.mindmap import branch_diagram_blueprint, build_mindmap
 from core.learning_memory import LearningMemoryService
 from core.llm import LLMError
 from core.obsidian import sync_vault
@@ -64,6 +75,14 @@ from core.web_research import _WeChatArticleParser, search_academic_articles, se
 
 
 class GardenTests(unittest.TestCase):
+    def test_clarification_question_is_not_duplicated_as_followup(self):
+        result = ask_clarification({
+            "intent": {"clarification_question": "你指的是哪一种人模型？"},
+            "trace": [],
+        })["result"]
+        self.assertEqual(result["answer"], "你指的是哪一种人模型？")
+        self.assertEqual(result["followup"], "")
+
     def test_diagnose_reasoning_error_is_not_misclassified_as_medical(self):
         self.assertEqual(_response_profile("请诊断这个热力学推导的错误。"), "grounded_knowledge")
         self.assertEqual(_response_profile("请诊断患者持续疼痛的原因。"), "health_guidance")
@@ -72,6 +91,44 @@ class GardenTests(unittest.TestCase):
             "题目：\n错误回答：‘未观察到反应，所以 ΔG 一定大于零。’请诊断并修正。"
         )
         self.assertEqual(_response_profile(wrapped), "grounded_knowledge")
+
+    def test_digital_afterlife_routes_as_thought_experiment_not_fact_check(self):
+        question = "我死了，Agent 代替我活着会怎样？"
+        intent = {
+            "primary_intent": "evaluate", "response_mode": "standard",
+            "research_object": "Agent 代替我生活", "concepts": ["数字分身"],
+        }
+        self.assertEqual(_response_profile(question), "thought_experiment")
+        self.assertFalse(_requires_authority_lookup(question, intent))
+        planned = planner_plan({"question": question, "intent": intent, "trace": []})
+        self.assertFalse(planned["planner_decision"]["online_research"])
+
+    def test_self_harm_language_is_not_downgraded_to_playful_thought_experiment(self):
+        self.assertEqual(_response_profile("我不想活了，想结束自己的生命。"), "health_guidance")
+
+    def test_open_discussion_model_failure_never_falls_back_to_evidence_refusal(self):
+        state = {
+            "question": "我死了，Agent代替我活着会怎样？",
+            "intent": {
+                "primary_intent": "define", "response_mode": "standard",
+                "concepts": [], "query_plan": {},
+            },
+            "evidence_review": {
+                "sufficient": False, "source_roles": {}, "usable_claims": [],
+                "gaps": ["没有直接证据"],
+            },
+            "accepted_sources": [], "retrieval_errors": [], "trace": [],
+        }
+        with patch("core.gardener_graph._agent_json", side_effect=LLMError("temporary 429")):
+            result = generate_answer(state)
+        self.assertIn("数字遗产", result["answer"])
+        self.assertIn("第一人称体验", result["answer"])
+        self.assertNotIn("这次先不补写答案", result["answer"])
+        self.assertNotIn("证据不足", result["answer"])
+        self.assertEqual(
+            result["trace"][-1]["data"]["generation_provider"],
+            "deterministic-open-discussion-fallback",
+        )
 
     def setUp(self):
         os.environ.pop("GARDEN_API_KEY", None)
@@ -400,6 +457,20 @@ class GardenTests(unittest.TestCase):
         self.assertFalse(hasattr(context, "active_memory_claims"))
         self.assertFalse(hasattr(context, "intent"))
 
+    def test_context_builder_adds_turn_scoped_teaching_preference(self):
+        self.store.set_setting("teaching_preferences", ["先讲机制"])
+        context = ContextBuilder(self.store).build(
+            "什么是心理学中的人模型？",
+            session_id="session-reanswer-context",
+            request_id="request-reanswer-context",
+            message_id="message-reanswer-context",
+            turn_teaching_preferences=["先举案例，再解释术语", "先讲机制"],
+        )
+        self.assertEqual(
+            context.learner_settings.explicit_teaching_preferences,
+            ("先讲机制", "先举案例，再解释术语"),
+        )
+
     def test_personalization_memory_is_scope_gated_and_keeps_evidence(self):
         with self.store.connect() as conn:
             conn.execute("INSERT INTO sessions(session_id,title) VALUES('scope-session','范围门控')")
@@ -521,6 +592,103 @@ class GardenTests(unittest.TestCase):
         self.assertEqual(len(recalled["claims"]), 1)
         self.assertIn("几何直觉", recalled["claims"][0]["claim_text"])
         self.assertGreaterEqual(recalled["claims"][0]["effective_confidence"], 0.8)
+
+    def test_reanswer_feedback_reuses_original_question_instead_of_routing_note(self):
+        memory = LearningMemoryService(self.store)
+        turn = memory.begin_turn("什么是心理学中的人模型？", "reanswer-session")
+        context = ContextBuilder(self.store).build(
+            "什么是心理学中的人模型？",
+            session_id=turn["session_id"], request_id=turn["request_id"],
+            message_id=turn["message_id"],
+        )
+        memory.complete_turn(context, {
+            "answer": "原来的解释", "personalization": {
+                "status": "standard", "task_key": "define",
+                "strategy_summary": "标准讲解（没有足够个性化证据）",
+                "applied_claim_ids": [],
+            },
+            "reasoning": {"task_key": "define"},
+        })
+        captured = {}
+
+        def fake_graph(_store, retry_context):
+            captured["question"] = retry_context.current_message.content
+            captured["preferences"] = retry_context.learner_settings.explicit_teaching_preferences
+            return {"answer": "用心理学案例重新解释", "personalization": {}, "reasoning": {}}
+
+        with patch("core.agent.run_gardener_graph", side_effect=fake_graph):
+            result = reanswer_with_feedback(
+                self.store,
+                request_id=turn["request_id"],
+                feedback_note="先举心理学案例，再解释术语",
+            )
+
+        self.assertEqual(captured["question"], "什么是心理学中的人模型？")
+        self.assertTrue(any("先举心理学案例，再解释术语" in item for item in captured["preferences"]))
+        self.assertEqual(result["answer"], "用心理学案例重新解释")
+        self.assertNotEqual(captured["question"], "先举心理学案例，再解释术语")
+        self.assertEqual(result["reanswer"]["feedback_type"], "STYLE_CHANGE")
+        self.assertFalse(result["reanswer"]["routing_recomputed"])
+        self.assertTrue(result["reanswer"]["teaching_preference_applied"])
+
+    def test_reanswer_intent_correction_recomputes_question_without_learning_it_as_style(self):
+        memory = LearningMemoryService(self.store)
+        turn = memory.begin_turn("人模型是什么？", "reanswer-intent-session")
+        context = ContextBuilder(self.store).build(
+            "人模型是什么？",
+            session_id=turn["session_id"], request_id=turn["request_id"],
+            message_id=turn["message_id"],
+        )
+        memory.complete_turn(context, {
+            "answer": "原回答理解成了数字人模型",
+            "personalization": {
+                "status": "standard", "task_key": "define",
+                "strategy_summary": "标准讲解（没有足够个性化证据）",
+                "applied_claim_ids": [],
+            },
+            "reasoning": {"task_key": "define"},
+        })
+        captured = {}
+
+        def fake_graph(_store, retry_context):
+            captured["question"] = retry_context.current_message.content
+            captured["preferences"] = retry_context.learner_settings.explicit_teaching_preferences
+            return {"answer": "心理学语境中的人模型解释", "personalization": {}, "reasoning": {}}
+
+        with patch("core.agent.run_gardener_graph", side_effect=fake_graph):
+            result = reanswer_with_feedback(
+                self.store,
+                request_id=turn["request_id"],
+                feedback_note="我希望你改成：心理学的人模型",
+            )
+
+        self.assertEqual(result["reanswer"]["feedback_type"], "INTENT_CORRECTION")
+        self.assertTrue(result["reanswer"]["routing_recomputed"])
+        self.assertFalse(result["reanswer"]["teaching_preference_applied"])
+        self.assertIn("心理学的人模型", captured["question"])
+        self.assertNotIn("我希望你改成", captured["question"])
+        self.assertNotIn("我希望你改成：心理学的人模型", captured["preferences"])
+
+    def test_reanswer_feedback_classifier_separates_style_scope_and_challenge(self):
+        for note in (
+            "讲简单一点，少用术语，多举一个例子",
+            "换一种方法",
+            "请用费曼方法讲",
+            "改用苏格拉底式解释",
+        ):
+            with self.subTest(note=note):
+                self.assertEqual(
+                    classify_reanswer_feedback(note)["feedback_type"],
+                    "STYLE_CHANGE",
+                )
+        self.assertEqual(
+            classify_reanswer_feedback("还要考虑社会环境的影响")["feedback_type"],
+            "SCOPE_CHANGE",
+        )
+        self.assertEqual(
+            classify_reanswer_feedback("你这一步推导不对，请重新核对")["feedback_type"],
+            "FACTUAL_CHALLENGE",
+        )
 
     def test_confirmed_preference_survives_teaching_strategy_agent(self):
         state = {
@@ -816,7 +984,7 @@ class GardenTests(unittest.TestCase):
             raise AssertionError(system)
 
         with patch("core.gardener_graph.chat_json", side_effect=fake_chat_json):
-            result = answer_from_wiki(self.store, "为什么审美能影响情绪？")
+            result = answer_from_wiki(self.store, "请根据我的知识库解释：为什么审美能影响情绪？")
         self.assertEqual(result["intent"]["primary_intent"], "explain_mechanism")
         self.assertEqual(result["teaching_strategy"]["teaching_move"], "repair_causal_chain")
         self.assertEqual(result["citations"][0]["title"], "审美距离")
@@ -825,7 +993,8 @@ class GardenTests(unittest.TestCase):
             ["planner_intake", "understand_question", "planner_plan", "load_learner_memory", "gate_personalization",
              "plan_sources", "retrieve_sources", "audit_evidence", "choose_teaching_strategy",
              "planner_select_delivery", "build_content_blueprint", "generate_answer",
-             "join_deliverables", "reflect_outputs", "assemble_result"],
+             "join_deliverables", "snapshot_initial_answer", "validate_output_syntax",
+             "reflect_outputs", "assemble_result"],
         )
         self.assertEqual(result["planner"]["visual_kind"], "none")
         self.assertEqual(result["planner"]["primary_modality"], "text")
@@ -908,16 +1077,209 @@ class GardenTests(unittest.TestCase):
         self.assertNotIn("Compare Synthetic Gamma & Delta", [item["label"] for item in nodes])
         self.assertIn("W1", next(item for item in nodes if item["label"] == "Pattern One")["evidence_ids"])
 
-    def test_evidence_gate_blocks_factual_generation_without_direct_source(self):
+    def test_evidence_gap_degrades_to_bounded_answer_instead_of_refusal(self):
         state = {
-            "evidence_review": {"sufficient": False, "gaps": ["没有直接证据"]},
+            "question": "截至今天，某机构官方如何定义这个新术语？",
+            "dialogue": "",
+            "intent": {
+                "primary_intent": "define", "response_mode": "standard",
+                "concepts": ["新术语"], "query_plan": {},
+            },
+            "reasoning_profile": {"activated": False, "key": "general", "score": 0},
+            "evidence_review": {
+                "sufficient": False, "gaps": ["没有直接证据"],
+                "source_roles": {}, "usable_claims": [],
+            },
             "retrieval_errors": [], "accepted_sources": [], "trace": [],
+            "retrieval_attempts": ["official_docs"],
+            "teaching_strategy": {"preference_directives": []},
         }
-        with patch("core.gardener_graph.chat_json") as model:
+        payload = {
+            "answer": "可以先按稳定的一般定义框架理解；该机构截至今天的官方表述尚未核验。",
+            "followup": "你指的是哪一家机构？", "discussion_prompts": [],
+        }
+        with patch("core.gardener_graph.chat_json", return_value=payload) as model:
             result = generate_answer(state)
-        model.assert_not_called()
-        self.assertIn("证据不足", result["answer"])
-        self.assertIn("硬门控", result["trace"][-1]["summary"])
+        model.assert_called_once()
+        self.assertIn("一般定义框架", result["answer"])
+        self.assertNotIn("这次先不补写答案", result["answer"])
+        self.assertNotIn("请重新提问", result["answer"])
+        self.assertIn("不得输出‘先不回答’", model.call_args.args[1])
+
+    def test_final_evidence_gate_restores_binding_without_replacing_answer(self):
+        state = {
+            "answer": "人因学研究人与系统之间的相互作用。",
+            "question": "什么是人因学？",
+            "intent": {"primary_intent": "define", "response_mode": "standard"},
+            "teaching_strategy": {"teaching_move": "direct_definition"},
+            "evidence_review": {
+                "sufficient": True,
+                "source_roles": {"P1": "direct_evidence"},
+                "usable_claims": ["人因学研究人与系统之间的相互作用"],
+            },
+            "accepted_sources": [{
+                "source_id": "P1", "title": "权威人因学定义",
+                "text": "人因学研究人与系统其他要素之间的相互作用。",
+                "source_type": "official_docs", "local": False,
+                "url": "https://example.org/human-factors", "access_scope": "open_fulltext",
+                "article": {},
+            }],
+            "candidate_sources": [], "retrieval_attempts": ["official_docs"],
+            "retrieval_errors": [], "followup": "还想看一个例子吗？",
+            "discussion_prompts": [], "quality_review": {"passed": True}, "trace": [],
+            "context": GardenContext(
+                request_id="final-gate-request", session_id="final-gate-session",
+                current_message=ChatMessage(
+                    message_id="final-gate-message", role="user", content="什么是人因学？",
+                ),
+            ),
+            "store": self.store,
+        }
+        result = assemble_result(state)["result"]
+        self.assertIn("人因学研究人与系统", result["answer"])
+        self.assertIn("[P1]", result["answer"])
+        self.assertIn("可核查依据", result["answer"])
+        self.assertNotIn("请重新提问", result["answer"])
+        self.assertEqual(result["citation_binding"]["used_source_ids"], ["P1"])
+
+    def test_stable_foundational_teaching_is_not_a_retrieval_gated_fact_check(self):
+        cases = [
+            (
+                "请针对热学第一定律向我提问，最好要难倒我。",
+                {"primary_intent": "apply", "response_mode": "standard"},
+            ),
+            (
+                "多元微积分中积分有哪些技巧？",
+                {"primary_intent": "explain_mechanism", "response_mode": "standard"},
+            ),
+            (
+                "请解释麦克斯韦方程组各项的物理意义。",
+                {"primary_intent": "explain_mechanism", "response_mode": "standard"},
+            ),
+        ]
+        for question, intent in cases:
+            with self.subTest(question=question):
+                self.assertTrue(_is_stable_educational_request(question, intent))
+                self.assertFalse(_requires_authority_lookup(question, intent))
+
+    def test_stable_teaching_route_does_not_swallow_current_or_source_requests(self):
+        cases = [
+            "请查截至今天最新量子计算实验结果并给论文来源。",
+            "官方最新版本的 Python 标准有什么变化？",
+            "麦克斯韦是哪一年提出方程组的？",
+            "根据教材原文解释热力学第一定律并给出页码。",
+        ]
+        intent = {"primary_intent": "explain_mechanism", "response_mode": "standard"}
+        for question in cases:
+            with self.subTest(question=question):
+                self.assertFalse(_is_stable_educational_request(question, intent))
+
+    def test_stable_teaching_generates_despite_failed_wikipedia_and_no_direct_source(self):
+        recovered = {
+            "answer": (
+                "先来一道综合题：绝热刚性容器分成两部分，撤去隔板后要求分别判断功、热量、"
+                "内能与熵的变化，并说明每一步使用的系统边界。"
+            ),
+            "followup": "你先从系统边界开始分析吗？",
+            "discussion_prompts": [],
+        }
+        state = {
+            "question": "请针对热学第一定律向我提问，最好要难倒我。",
+            "dialogue": "",
+            "intent": {
+                "primary_intent": "apply", "response_mode": "standard",
+                "concepts": ["热学第一定律"], "query_plan": {},
+            },
+            "accepted_sources": [],
+            "evidence_review": {
+                "sufficient": False, "source_roles": {}, "usable_claims": [],
+                "gaps": ["没有直接教材正文"],
+                "routing_target": "MODEL_KNOWLEDGE_ALLOWED",
+            },
+            "teaching_strategy": {"preference_directives": []},
+            "retrieval_attempts": ["Wikipedia:热学第一定律"],
+            "retrieval_errors": ["Wikipedia:1:URLError"],
+        }
+        with patch("core.gardener_graph._agent_json", return_value=recovered) as model:
+            result = generate_answer(state)
+        self.assertEqual(result["answer"], recovered["answer"])
+        self.assertEqual(result["generation_sources"], [])
+        self.assertNotIn("证据不足", result["answer"])
+        self.assertNotIn("这次先不补写答案", result["answer"])
+        self.assertIn("禁止在正文中汇报‘教材级’", model.call_args.args[1])
+        self.assertNotIn("检索异常：", model.call_args.args[1])
+        self.assertNotIn("可用论断：", model.call_args.args[1])
+
+    def test_model_knowledge_meta_refusal_retries_plain_text_and_reports_real_failure(self):
+        state = {
+            "question": "什么是线性代数？", "dialogue": "",
+            "intent": {
+                "primary_intent": "define", "response_mode": "standard",
+                "concepts": ["线性代数"], "query_plan": {},
+            },
+            "accepted_sources": [], "retrieval_attempts": [], "retrieval_errors": [],
+            "evidence_review": {
+                "sufficient": False, "source_roles": {}, "usable_claims": [], "gaps": [],
+                "routing_target": "MODEL_KNOWLEDGE_ALLOWED",
+            },
+            "teaching_strategy": {"preference_directives": []},
+        }
+        recovered = "线性代数研究向量、线性变换与线性方程组；矩阵是表达这些关系的主要工具。"
+        with patch("core.gardener_graph._agent_json", return_value={"answer": "这次先不回答"}), patch(
+            "core.gardener_graph.chat", return_value=recovered,
+        ) as plain:
+            result = generate_answer(state)
+        self.assertEqual(result["answer"], recovered)
+        self.assertFalse(result["generation_failed"])
+        self.assertEqual(
+            result["trace"][-1]["data"]["generation_provider"],
+            "project-model-stable-knowledge-text-retry",
+        )
+        plain.assert_called_once()
+
+        with patch("core.gardener_graph._agent_json", return_value={"answer": "这次先不回答"}), patch(
+            "core.gardener_graph.chat", side_effect=LLMError("timeout"),
+        ):
+            failed = generate_answer(state)
+        self.assertTrue(failed["generation_failed"])
+        self.assertNotIn("请重试", failed["answer"])
+        self.assertNotIn("外部检索没有提供", failed["answer"])
+
+    def test_multivariable_calculus_tips_are_answered_without_forced_textbook_binding(self):
+        recovered = {
+            "answer": (
+                "多元积分先画区域，再决定直角坐标、极坐标或变量代换；换元时必须带上"
+                "雅可比行列式，并检查新区域边界。对称性可以消去奇函数部分，但要先确认积分域对称。"
+            ),
+            "followup": "要用一道换元题练习吗？",
+            "discussion_prompts": [],
+        }
+        state = {
+            "question": "多元微积分中积分有哪些技巧？",
+            "dialogue": "",
+            "intent": {
+                "primary_intent": "explain_mechanism", "response_mode": "standard",
+                "concepts": ["多元微积分", "积分"], "query_plan": {},
+            },
+            "accepted_sources": [{
+                "source_id": "L1", "title": "重积分",
+                "text": "只包含标题，不能支持完整技巧列表。",
+                "source_type": "local_wiki", "local": True,
+            }],
+            "evidence_review": {
+                "sufficient": False, "source_roles": {"L1": "prerequisite"},
+                "usable_claims": [], "gaps": ["页面只覆盖前置定义"],
+            },
+            "teaching_strategy": {"preference_directives": []},
+            "retrieval_attempts": [],
+            "retrieval_errors": [],
+        }
+        with patch("core.gardener_graph._agent_json", return_value=recovered):
+            result = generate_answer(state)
+        self.assertEqual(result["answer"], recovered["answer"])
+        self.assertEqual(result["generation_sources"], [])
+        self.assertNotIn("[L1]", result["answer"])
+        self.assertNotIn("证据不足", result["answer"])
 
     def test_subjective_question_can_be_discussed_without_fabricated_citations(self):
         state = {
@@ -1056,7 +1418,8 @@ class GardenTests(unittest.TestCase):
         result = generate_answer(state)
         self.assertIn("亥姆霍兹", result["answer"])
         self.assertIn("恒温恒压", result["answer"])
-        self.assertIn("证据不足", result["answer"])
+        self.assertNotIn("这次先不补写答案", result["answer"])
+        self.assertIn("不需要外部证据", result["answer"])
 
     def test_comparison_subjects_ignore_followup_instructions(self):
         subjects = _comparison_subjects(
@@ -1294,9 +1657,95 @@ class GardenTests(unittest.TestCase):
         self.assertTrue(planned["online_research"])
         source_state = {**state, "planner_decision": planned, "history": []}
         source_plan = plan_sources(source_state)["source_plan"]
-        self.assertIn("encyclopedia", source_plan["source_types"])
+        self.assertNotIn("encyclopedia", source_plan["source_types"])
+        self.assertIn("public_web", source_plan["source_types"])
         self.assertIn("review", source_plan["source_types"])
         self.assertIn("research_paper", source_plan["source_types"])
+
+    def test_ordinary_psychology_question_skips_source_gate(self):
+        state = {
+            "question": "什么是心理学中的人模型？",
+            "intent": {
+                "primary_intent": "define", "secondary_intents": [],
+                "research_object": "心理学中的人模型", "core_question": "什么是心理学中的人模型",
+                "claim_to_verify": "", "response_mode": "standard", "concepts": ["人模型"],
+                "target_kind": "concept",
+            },
+            "reasoning_profile": {"activated": False},
+            "history": [], "trace": [],
+        }
+        self.assertEqual(route_after_personalization(state), "prepare_model_knowledge")
+        planned = planner_plan(state)["planner_decision"]
+        self.assertFalse(planned["online_research"])
+        self.assertEqual(
+            planned["required_steps"],
+            ["load_learner_memory", "prepare_model_knowledge", "choose_teaching_strategy", "generate_answer", "reflect_outputs"],
+        )
+
+    def test_wikipedia_is_only_selected_when_user_names_it(self):
+        base = {
+            "intent": {
+                "primary_intent": "define", "research_object": "心理学中的人模型",
+                "core_question": "什么是心理学中的人模型", "concepts": ["人模型"],
+                "response_mode": "standard", "target_kind": "concept",
+            },
+            "planner_decision": {"online_research": True}, "history": [], "trace": [],
+        }
+        ordinary = plan_sources({**base, "question": "什么是心理学中的人模型？"})["source_plan"]
+        explicit = plan_sources({**base, "question": "请查 Wikipedia 解释心理学中的人模型"})["source_plan"]
+        forbidden = plan_sources({**base, "question": "请查官方资料，不要查维基百科"})["source_plan"]
+        unimportant = plan_sources({**base, "question": "请查官网，维基百科并不重要"})["source_plan"]
+        self.assertNotIn("encyclopedia", ordinary["source_types"])
+        self.assertIn("encyclopedia", explicit["source_types"])
+        self.assertNotIn("encyclopedia", forbidden["source_types"])
+        self.assertNotIn("encyclopedia", unimportant["source_types"])
+        self.assertNotIn("local_wiki", explicit["source_types"])
+        self.assertEqual(_wikipedia_preference("请用维基百科解释人模型"), "REQUIRED")
+        self.assertEqual(_wikipedia_preference("请参考 Wikipedia 解释人模型"), "REQUIRED")
+        self.assertEqual(_wikipedia_preference("维基百科不是必须"), "FORBIDDEN")
+        self.assertEqual(_wikipedia_preference("我们之前随口提到维基百科"), "UNSPECIFIED")
+
+        route_state = {
+            **base, "question": "请用维基百科解释心理学中的人模型",
+            "reasoning_profile": {"activated": False},
+        }
+        self.assertEqual(route_after_personalization(route_state), "plan_sources")
+
+    def test_casual_time_words_do_not_force_online_research(self):
+        intent = {"primary_intent": "define", "response_mode": "standard", "target_kind": "concept"}
+        for question in (
+            "我现在不理解导数，请解释一下",
+            "今天给我讲讲心理学中的人模型",
+            "我今年刚学高数，什么是梯度？",
+        ):
+            with self.subTest(question=question):
+                self.assertFalse(_requires_authority_lookup(question, intent))
+
+    def test_explicit_local_source_rejection_overrides_local_keywords(self):
+        self.assertFalse(_requires_local_knowledge_lookup(
+            "不要使用本地教材或 Wiki，直接回答",
+            {},
+        ))
+
+    def test_meta_refusal_guard_covers_paraphrases(self):
+        for answer in (
+            "这次先不回答。",
+            "我暂时不直接作答。",
+            "当前无法给出答案，请稍后再试。",
+            "请换个问题。",
+            "抱歉，我不能回答这个问题。",
+            "我无法作答。",
+            "这个问题我不方便回答。",
+            "现阶段无法回答。",
+            "无法给出答案。",
+            "我不能直接回答。",
+        ):
+            with self.subTest(answer=answer):
+                self.assertRegex(answer, _META_REFUSAL_LANGUAGE)
+        self.assertNotRegex(
+            "这个实验不回答因果机制，只测相关性，因此结论不能外推。",
+            _META_REFUSAL_LANGUAGE,
+        )
 
     def test_question_subject_reduces_a_full_chinese_question_to_the_term(self):
         self.assertEqual(
@@ -1457,6 +1906,56 @@ class GardenTests(unittest.TestCase):
         self.assertTrue(result["evidence_review"]["sufficient"])
         self.assertEqual(result["evidence_review"]["source_roles"]["P1"], "direct_evidence")
 
+    def test_source_dependent_research_never_has_wikipedia_as_only_online_route(self):
+        question = "请查截至今天官方公布的量子纠错实验结果，并给出论文来源。"
+        intent = {
+            "primary_intent": "evaluate", "secondary_intents": [],
+            "research_object": "量子纠错实验", "target_kind": "concept",
+            "core_question": question, "concepts": ["量子纠错"],
+            "explicit_constraints": ["截至今天", "官方结果"],
+            "claim_to_verify": "最新实验结果", "response_mode": "standard",
+            "retrieval_queries": [],
+        }
+        result = plan_sources({
+            "question": question, "intent": intent, "history": [], "trace": [],
+            "planner_decision": {"online_research": True, "complexity": "complex"},
+        })
+        source_types = result["source_plan"]["source_types"]
+        self.assertIn("public_web", source_types)
+        self.assertIn("review", source_types)
+        self.assertIn("research_paper", source_types)
+
+    def test_failed_evidence_audit_triggers_one_bounded_non_wikipedia_retry(self):
+        question = "请查截至今天官方公布的量子纠错实验结果，并给出论文来源。"
+        intent = {
+            "primary_intent": "evaluate", "research_object": "量子纠错实验",
+            "core_question": question, "concepts": ["量子纠错"],
+            "claim_to_verify": "最新实验结果", "response_mode": "standard",
+        }
+        state = {
+            "question": question, "intent": intent,
+            "planner_decision": {"online_research": True},
+            "evidence_review": {"sufficient": False, "gaps": ["Wikipedia 无正文"]},
+            "retrieval_round": 0,
+            "source_plan": {
+                "source_types": ["local_wiki", "encyclopedia", "review"],
+                "search_query": question, "rationale": "首轮",
+            },
+            "trace": [],
+        }
+        with patch.dict(os.environ, {"GARDEN_DISABLE_NETWORK": "0"}):
+            self.assertEqual(route_after_evidence_audit(state), "prepare_retrieval_retry")
+            retried = prepare_retrieval_retry(state)
+            self.assertEqual(retried["retrieval_round"], 1)
+            self.assertIn("public_web", retried["source_plan"]["source_types"])
+            self.assertIn("research_paper", retried["source_plan"]["source_types"])
+            self.assertNotIn("encyclopedia", retried["source_plan"]["source_types"])
+            self.assertNotIn("请查", retried["source_plan"]["search_query"])
+            self.assertEqual(
+                route_after_evidence_audit({**state, **retried}),
+                "choose_teaching_strategy",
+            )
+
     def test_person_clarification_followup_completes_full_cited_answer(self):
         history = [
             {"role": "user", "content": "艾颖华是谁"},
@@ -1505,7 +2004,9 @@ class GardenTests(unittest.TestCase):
             result = planner_plan(state)
         model.assert_not_called()
         self.assertEqual(result["planner_decision"]["complexity"], "simple")
-        self.assertTrue(result["planner_decision"]["online_research"])
+        self.assertFalse(result["planner_decision"]["online_research"])
+        self.assertIn("prepare_model_knowledge", result["planner_decision"]["required_steps"])
+        self.assertNotIn("retrieve_sources", result["planner_decision"]["required_steps"])
         self.assertEqual(result["trace"][-1]["data"]["planning_mode"], "deterministic_fast_path")
 
     def test_unconfigured_glm_uses_safe_millisecond_definition_parser(self):
@@ -1532,6 +2033,24 @@ class GardenTests(unittest.TestCase):
             })
         self.assertEqual(result["intent"]["primary_intent"], "apply")
         self.assertEqual(result["intent"]["query_plan"]["subject_mode"], "foundational")
+
+    def test_explicitly_scoped_concept_is_answered_without_another_clarification(self):
+        payload = {
+            "primary_intent": "clarify", "secondary_intents": [],
+            "research_object": "心理学中的人模型", "target_kind": "concept",
+            "core_question": "心理学中的人模型指什么", "concepts": ["人模型"],
+            "task_demand": "understand", "possible_obstacle": "definition_gap",
+            "needs_clarification": True,
+            "clarification_question": "是整体人性观还是心智模型？",
+            "confidence": 0.72,
+        }
+        with patch("core.gardener_graph._understanding_agent_json", return_value=(payload, "glm:test")):
+            result = understand_question({
+                "store": self.store, "question": "今天给我讲讲心理学中的人模型",
+                "dialogue": "", "history": [], "trace": [],
+            })
+        self.assertFalse(result["intent"]["needs_clarification"])
+        self.assertEqual(result["intent"]["primary_intent"], "define")
 
     def test_glm_fallback_keeps_definition_when_application_contains_design(self):
         with patch("core.gardener_graph._understanding_agent_json", return_value=(
@@ -2255,11 +2774,54 @@ class GardenTests(unittest.TestCase):
         self.assertIn("## 核心定义", concept_page.read_text(encoding="utf-8"))
         self.assertNotIn("等待后续资料继续充实", concept_page.read_text(encoding="utf-8"))
 
-    def test_frontier_analysis_creates_card_and_review_tasks(self):
+    def test_frontier_analysis_creates_one_deep_guide_without_cards(self):
         self.store.upsert_note({"path": "wiki/01-概念底座/反向传播.md", "title": "反向传播", "kind": "concept", "content": "反向传播用链式法则计算损失函数对参数的梯度。", "content_hash": "x"})
-        result = analyze_frontier(self.store, "残差网络", "残差网络通过快捷连接改善深层网络的梯度传播。")
-        self.assertGreaterEqual(len(result["cards"]), 1)
-        self.assertGreaterEqual(len(self.store.list_tasks()), 2)
+        def model(_: str, prompt: str, **__: object):
+            if "返回 overview" in prompt:
+                return {
+                    "overview": "材料解释了残差连接如何改善梯度传播。",
+                    "chapter_outline": [],
+                    "key_points": [{"point": "快捷连接改善深层网络的梯度传播", "evidence": "残差网络通过快捷连接改善深层网络的梯度传播。"}],
+                    "concepts": ["残差连接"], "caveats": [], "questions": ["快捷连接在何种条件下有效？"],
+                }
+            return None
+        with patch("core.engine._frontier_json", side_effect=model):
+            result = analyze_frontier(self.store, "残差网络", "残差网络通过快捷连接改善深层网络的梯度传播。")
+        self.assertEqual(result["analysis_mode"], "glm_deep_read")
+        self.assertEqual(result["cards"], [])
+        self.assertEqual(self.store.list_cards(), [])
+        self.assertEqual(self.store.list_tasks(), [])
+        self.assertIn("梯度传播", result["guide"]["overview"])
+
+    def test_long_transcript_reaches_deep_guide_without_persisted_cards(self):
+        early = "\n".join(
+            f"[00:{index // 60:02d}:{index % 60:02d} --> 00:{index // 60:02d}:{(index + 1) % 60:02d}] "
+            + "这一段只是铺垫背景" * 12
+            for index in range(120)
+        )
+        late_line = "[01:18:20 --> 01:18:28] 这里首次提出时间晶体机制，并比较普通周期驱动。"
+        material = f"## 视频导读\n这只是模型摘要，不应冒充原字幕。\n\n## 转录（公开字幕）\n{early}\n{late_line}"
+        guide = {
+            "overview": "视频后段讨论时间晶体机制。",
+            "key_points": [{"point": "提出时间晶体机制", "evidence": late_line, "timestamp": "01:18:20"}],
+            "chapter_outline": [{"title": "时间晶体", "timestamp": "01:18:20", "summary": "后段核心"}],
+            "concepts": ["时间晶体机制"], "caveats": [], "questions": ["如何验证？"],
+            "generation_failed": False,
+        }
+        with patch("core.bilibili_mcp._video_analysis", return_value=guide):
+            result = analyze_frontier(self.store, "长视频", material)
+        self.assertGreater(result["coverage"]["chunks"], 1)
+        self.assertEqual(result["coverage"]["processed_chunks"], result["coverage"]["chunks"])
+        self.assertIn("时间晶体机制", result["concepts"])
+        self.assertIn(late_line, result["guide"]["key_points"][0]["evidence"])
+        self.assertEqual(result["cards"], [])
+        self.assertEqual(self.store.list_cards(), [])
+
+    def test_concept_fallback_scans_late_transcript_when_model_fails(self):
+        text = ("前段普通背景材料。" * 1200) + "\n[01:42:00 --> 01:42:08] 最后才说明代理梯度用于处理不可微的脉冲函数。"
+        with patch("core.engine._frontier_json", side_effect=LLMError("模型暂不可用")):
+            concepts = extract_concepts(text)
+        self.assertIn("代理梯度", concepts)
 
     def test_psychology_article_becomes_nested_knowledge_branch(self):
         vault = self.root / "vault"
@@ -2281,13 +2843,15 @@ class GardenTests(unittest.TestCase):
         branch = next(node for node in psychology["children"] if node["title"] == "社会与文化心理学")
         self.assertIn("参照群体效应", {node["title"] for node in branch["children"]})
 
-    def test_reanalysis_replaces_cards_and_tasks_without_duplicates(self):
+    def test_reanalysis_keeps_source_without_creating_cards_or_tasks(self):
         text = "文化差异的测量受到参照群体效应影响，个体还会进行主动情境选择。"
-        first = analyze_frontier(self.store, "被误解的集体主义文化", text)
-        second = analyze_frontier(self.store, "被误解的集体主义文化", text)
-        self.assertEqual(len(self.store.list_cards()), len(second["cards"]))
-        self.assertEqual(len(self.store.list_tasks()), len(second["cards"]) * 2)
-        self.assertEqual(second["removed"]["cards"], len(first["cards"]))
+        generated = {"overview": "材料讨论文化差异测量。", "chapter_outline": [], "key_points": [], "concepts": ["参照群体效应"], "caveats": [], "questions": []}
+        with patch("core.engine._frontier_json", return_value=generated):
+            analyze_frontier(self.store, "被误解的集体主义文化", text)
+            second = analyze_frontier(self.store, "被误解的集体主义文化", text)
+        self.assertEqual(second["cards"], [])
+        self.assertEqual(self.store.list_cards(), [])
+        self.assertEqual(self.store.list_tasks(), [])
 
     def test_agent_patrol_updates_manifest_and_briefing(self):
         vault = self.root / "vault"
@@ -2321,7 +2885,7 @@ class GardenTests(unittest.TestCase):
             "content": "参照群体效应会让不同文化中的相同问卷分数具有不同含义。\n来源：https://example.edu/reference-group-effect",
             "source_url": "https://example.edu/reference-group-effect", "content_hash": "agent-wiki",
         })
-        answer = answer_from_wiki(self.store, "为什么跨文化问卷分数不能直接比较？")
+        answer = answer_from_wiki(self.store, "请根据我的知识库解释：为什么跨文化问卷分数不能直接比较？")
         self.assertEqual(answer["evidence_layer"], "wiki")
         self.assertEqual(answer["citations"][0]["title"], "参照群体效应")
         self.assertEqual(answer["web_sources"], [])
@@ -2333,7 +2897,7 @@ class GardenTests(unittest.TestCase):
             "content": "审美距离让人接近情绪内容，同时保留反思空间。\n来源：https://example.edu/aesthetic-distance",
             "source_url": "https://example.edu/aesthetic-distance", "content_hash": "dialogue-wiki",
         })
-        answer = answer_from_wiki(self.store, "那它什么时候会失效？", [
+        answer = answer_from_wiki(self.store, "请根据我的知识库继续讨论：审美距离什么时候会失效？", [
             {"role": "user", "content": "审美为什么能调节情绪？"},
             {"role": "assistant", "content": "审美距离可能提供安全边界。"},
         ])
@@ -2415,6 +2979,50 @@ class GardenTests(unittest.TestCase):
         self.assertIn("你主动填写的专业/当前重点", result["profile"]["basis"][0])
         self.assertIn("材料物理", result["chosen_directions"])
 
+    def test_daily_digest_always_keeps_a_declared_interest_and_uses_english_academic_query(self):
+        self.store.set_setting("interests", ["音乐"])
+        self.store.upsert_note({
+            "path": "wiki/04-主题索引/经济学.md", "title": "经济学", "kind": "moc",
+            "tags": ["经济学", "本科入门"], "content": "近期主题", "content_hash": "recent-noise",
+        })
+        with patch("core.agent.search_academic_articles", return_value=[]) as search:
+            result = daily_digest(self.store, force=True)
+        self.assertIn("音乐", result["chosen_directions"])
+        self.assertTrue(any("music cognition" in call.args[0] for call in search.call_args_list))
+        self.assertNotIn("本科入门", result["profile"]["recent_topics"])
+
+    def test_daily_digest_has_a_hard_deadline_for_stuck_academic_sources(self):
+        self.store.set_setting("interests", ["音乐"])
+        blocker = threading.Event()
+        with patch("core.agent.search_academic_articles", side_effect=lambda *args, **kwargs: blocker.wait(0.2)):
+            with patch("core.agent.wait", wraps=__import__("concurrent.futures").futures.wait) as bounded_wait:
+                # Replace the real 18-second wait with an immediate timeout while preserving its contract.
+                bounded_wait.side_effect = lambda futures, timeout: (set(), set(futures))
+                result = daily_digest(self.store, force=True)
+        self.assertEqual(result["items"], [])
+        self.assertIn("超过18秒", result["notice"])
+        bounded_wait.assert_called_once()
+
+    def test_daily_digest_uses_weak_mastery_as_a_frontier_bridge(self):
+        self.store.set_setting("learning_level", "本科入门")
+        self.store.set_setting("interests", ["AI"])
+        with self.store.connect() as conn:
+            conn.execute(
+                """INSERT INTO concept_mastery(
+                       concept_key,stage,confidence,last_evidence_at,stability_days
+                   ) VALUES(?,?,?,?,?)""",
+                ("反向传播", "exposed", 0.35, "2026-08-01T00:00:00Z", 2.0),
+            )
+        article = {
+            "title": "Recent learning systems", "url": "https://doi.org/weak-bridge",
+            "year": 2026, "authors": ["A"], "venue": "Journal", "source": "OpenAlex",
+            "abstract": "Learning systems research.",
+        }
+        with patch("core.agent.search_academic_articles", return_value=[article]):
+            result = daily_digest(self.store, force=True)
+        self.assertIn("反向传播", result["profile"]["weak_concepts"])
+        self.assertTrue(any("需要巩固的概念" in item for item in result["profile"]["basis"]))
+
     def test_academic_search_falls_back_to_crossref_with_diagnostics(self):
         crossref_payload = {"message": {"items": [{
             "DOI": "10.1234/garden.2026", "title": ["A useful fallback article"],
@@ -2455,6 +3063,27 @@ class GardenTests(unittest.TestCase):
         ]):
             result = daily_digest(self.store, force=True)
         self.assertEqual(len(result["items"]), 1)
+
+    def test_daily_digest_rejects_stopword_false_connections_and_keeps_publication_metadata(self):
+        self.store.set_setting("interests", ["AI"])
+        self.store.upsert_note({
+            "path": "wiki/01-概念底座/手工业幸福理想.md", "title": "手工业幸福理想",
+            "kind": "concept", "content": "historical needs and market key structure",
+            "content_hash": "false-frontier-connection",
+        })
+        article = {
+            "title": "Insurance fraud detection review", "url": "https://doi.org/false-link",
+            "year": 2026, "publication_date": "2026-08-01", "authors": ["Ada"],
+            "venue": "Reliable Journal", "source": "Crossref / DOI",
+            "abstract": "Artificial intelligence for insurance fraud and key applications.",
+        }
+        with patch("core.agent.search_academic_articles", return_value=[article]):
+            result = daily_digest(self.store, force=True)
+        item = result["items"][0]
+        self.assertEqual(item["connections"], [])
+        self.assertEqual(item["scores"]["knowledge_connection"], 0.0)
+        self.assertEqual(item["publication_date"], "2026-08-01")
+        self.assertEqual(item["venue"], "Reliable Journal")
 
     def test_graph_merges_normalized_duplicate_titles_without_deleting_notes(self):
         first_id, _ = self.store.upsert_note({
@@ -2522,6 +3151,49 @@ class GardenTests(unittest.TestCase):
         self.assertEqual(branch["children"][0]["title"], "泽塔母体")
         self.assertEqual(branch["children"][0]["children"][0]["title"], "蓝桥机制")
         self.assertEqual(branch["children"][0]["children"][0]["children"][0]["title"], "月纹测量法")
+
+    def test_mindmap_quarantines_staging_residue_without_deleting_notes(self):
+        self.store.upsert_note({
+            "path": "wiki/01-概念底座/BV1ABCdef234.md", "title": "BV1ABCdef234",
+            "kind": "concept", "content": "视频来源编号", "content_hash": "junk-bv",
+            "tags": ["待归类的新知", "概念底座"],
+        })
+        result = build_mindmap(self.store)
+        self.assertEqual(result["quality"]["quarantined_count"], 1)
+        self.assertEqual(self.store.list_notes()[0]["title"], "BV1ABCdef234")
+
+    def test_mindmap_uses_explicit_moc_tags_for_deep_hierarchy(self):
+        parent = None
+        for index, (title, tags) in enumerate([
+            ("计算机科学", ["MOC", "学科", "计算机科学"]),
+            ("人工智能", ["MOC", "计算机科学", "人工智能"]),
+            ("神经网络", ["MOC", "人工智能", "神经网络"]),
+            ("脉冲神经网络", ["MOC", "神经网络", "脉冲神经网络"]),
+        ]):
+            parent, _ = self.store.upsert_note({
+                "path": f"wiki/04-主题索引/{title}.md", "title": title, "kind": "moc",
+                "content": f"# {title}\n\n知识主题。", "content_hash": f"deep-moc-{index}",
+                "tags": tags,
+            })
+        tree = build_mindmap(self.store)["tree"]
+        computer = next(item for item in tree["children"] if item["title"] == "计算机科学")
+        self.assertEqual(computer["children"][0]["children"][0]["children"][0]["title"], "脉冲神经网络")
+
+    def test_branch_diagram_blueprint_preserves_existing_relations(self):
+        tree = {
+            "id": "root", "title": "花园", "children": [{
+                "id": 1, "title": "数学", "children": [{
+                    "id": 2, "title": "概率论", "children": [
+                        {"id": 3, "title": "随机变量", "children": []},
+                    ],
+                }],
+            }],
+        }
+        blueprint = branch_diagram_blueprint(tree, 1)
+        self.assertIsNotNone(blueprint)
+        self.assertEqual(blueprint["research_object"], "数学")
+        self.assertIn("数学 包含 概率论", blueprint["usable_claims"])
+        self.assertIn("概率论 包含 随机变量", blueprint["usable_claims"])
 
     def test_interest_capture_discovers_professional_link(self):
         self.store.upsert_note({"path": "wiki/01-概念底座/注意力机制.md", "title": "注意力机制", "kind": "concept", "content": "注意力机制给不同信息分配不同权重，聚焦关键部分。", "content_hash": "z"})
@@ -2600,8 +3272,14 @@ class GardenTests(unittest.TestCase):
         self.assertEqual(second["skipped"], 1)
 
     def test_review_requires_answer_and_schedules_next_interval(self):
-        result = analyze_frontier(self.store, "梯度下降", "梯度下降通过损失函数的梯度更新模型参数。")
-        quiz = next(task for task in self.store.list_tasks() if task["task_type"] == "quiz")
+        quiz_id = self.store.add_task(
+            "梯度下降复习", "quiz", "梯度下降", {
+                "question": "梯度下降使用什么信息更新参数？",
+                "options": ["损失函数梯度", "随机标签", "文件大小", "网络延迟"],
+                "answer": 0,
+            }, datetime.now(timezone.utc).isoformat(), 20,
+        )
+        quiz = self.store.get_task(quiz_id)
         assessment = evaluate_review(quiz, quiz["payload"]["answer"])
         review = self.store.record_review(quiz["id"], assessment["quality"], assessment["feedback"], str(quiz["payload"]["answer"]))
         self.assertTrue(assessment["correct"])

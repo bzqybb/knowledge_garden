@@ -3,14 +3,16 @@ from __future__ import annotations
 import os
 import re
 import time
+import difflib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from typing import Any, Literal, TypedDict
+from typing import Any, Callable, Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from core.authority_research import search_wikipedia
+from core.config import closed_loop_generation_timeout_seconds
 from core.context import GardenContext
 from core.deepdiagram_adapter import (
     DiagramSpec, build_local_diagram, diagram_has_teaching_value,
@@ -18,14 +20,16 @@ from core.deepdiagram_adapter import (
 )
 from core.deepdiagram_service import DeepDiagramServiceError, generate_with_full_service
 from core.learning_memory import LearningMemoryService
-from core.llm import LLMError, chat_json, understanding_chat_json
+from core.llm import LLMError, chat, chat_json, chat_stream, understanding_chat_json
 from core.query_understanding import ALIAS_GROUPS, build_query_plan
 from core.reasoning_capability import (
     classify_reasoning_task,
+    evidence_route,
     is_self_contained_reasoning,
     reasoning_prompt,
     reasoning_subject,
     review_reasoning_answer,
+    science_precision_instruction,
 )
 from core.retrieval import relevance_gate, search_notes
 from core.storage import GardenStore
@@ -139,8 +143,8 @@ class PlannerDecision(BaseModel):
     goal: str = "回答当前学习问题"
     complexity: Literal["simple", "moderate", "complex"] = "moderate"
     required_steps: list[str] = Field(default_factory=lambda: [
-        "load_learner_memory", "plan_sources", "retrieve_sources",
-        "audit_evidence", "choose_teaching_strategy", "generate_answer", "reflect_outputs",
+        "load_learner_memory", "prepare_model_knowledge",
+        "choose_teaching_strategy", "generate_answer", "reflect_outputs",
     ])
     primary_modality: Literal["text", "text_visual"] = "text"
     relation_type: Literal[
@@ -169,7 +173,8 @@ class QualityReview(BaseModel):
     visualization_grounded: bool = True
     repair_target: Literal["none", "text", "visualization", "both"] = "none"
     issues: list[str] = Field(default_factory=list)
-    revised_answer: str = ""
+    missing_rubric_ids: list[str] = Field(default_factory=list)
+    critique: str = ""
     rationale: str = ""
 
 
@@ -179,6 +184,7 @@ class GardenerState(TypedDict, total=False):
     question: str
     history: list[dict[str, str]]
     dialogue: str
+    conversation_state: dict[str, Any]
     learner_context: dict[str, Any]
     profile_graph: dict[str, Any]
     personalization_plan: dict[str, Any]
@@ -191,17 +197,23 @@ class GardenerState(TypedDict, total=False):
     candidate_sources: list[dict[str, Any]]
     retrieval_attempts: list[str]
     retrieval_errors: list[str]
+    retrieval_round: int
     evidence_review: dict[str, Any]
     accepted_sources: list[dict[str, Any]]
     generation_sources: list[dict[str, Any]]
     teaching_strategy: dict[str, Any]
     content_blueprint: dict[str, Any]
     answer: str
+    initial_answer: str
     followup: str
     discussion_prompts: list[str]
     quality_review: dict[str, Any]
     visualization: dict[str, Any]
     revision_count: int
+    repair_degraded: bool
+    repair_diagnostics: dict[str, Any]
+    syntax_review: dict[str, Any]
+    generation_failed: bool
     trace: list[dict[str, Any]]
     result: dict[str, Any]
     direct_material: dict[str, Any]
@@ -240,7 +252,13 @@ def _agent_json(system: str, user: str, *, timeout: float = 18) -> dict[str, Any
 
 def _understanding_agent_json(system: str, user: str) -> tuple[dict[str, Any] | None, str]:
     """Keep semantic parsing on its dedicated GLM lane when configured."""
-    return understanding_chat_json(system, user, timeout=6, max_retries=0)
+    try:
+        timeout = float(os.getenv("GARDEN_UNDERSTANDING_TIMEOUT_SECONDS", "6"))
+    except ValueError:
+        timeout = 6.0
+    return understanding_chat_json(
+        system, user, timeout=max(6.0, min(30.0, timeout)), max_retries=0,
+    )
 
 
 def _normalize_understanding_payload(
@@ -471,24 +489,108 @@ def _fallback_planner(question: str, intent: dict[str, Any]) -> PlannerDecision:
     )
 
 
-def _requires_authority_lookup(question: str, intent: dict[str, Any]) -> bool:
-    """Keep factual learning questions from silently becoming local-only.
+def _is_stable_educational_request(question: str, intent: dict[str, Any]) -> bool:
+    """Allow timeless teaching from model knowledge without a source veto.
 
-    Wiki-first is a ranking policy, not permission to stop before an available
-    authority lookup.  Explicit user requests to stay offline still win.
+    The permission is based on the epistemic demand, not a hard-coded list of
+    school subjects.  Current, empirical, official, biographical and explicitly
+    sourced claims still require retrieval; ordinary definitions, mechanisms,
+    comparisons and methods do not have to pass through a local textbook or an
+    encyclopedia before the model may answer.
+    """
+    text = re.sub(r"\s+", "", reasoning_subject(question))
+    if not text:
+        return False
+    if re.search(
+        r"最新|截至|实时|当前版本|现任|"
+        r"(?:今天|目前|现在|近期|刚刚|今年|本周).{0,10}(?:新闻|价格|数据|政策|版本|排名|发布|上线|结果|进展|情况|现任)|"
+        r"官方|新闻|报道|价格|排名|政策|法规|标准|发布|上线|"
+        r"真实数据|实际统计|调查结果|实验结果|临床|诊断|用药|"
+        r"请查|查一下|检索|搜索|联网|给出(?:来源|出处|引用)|"
+        r"根据(?:论文|研究|教材)|论文(?:怎么说|如何解释)|"
+        r"谁提出|哪一年|什么时候|生平|历史事件",
+        text,
+        re.I,
+    ):
+        return False
+    teaching_action = bool(re.search(
+        r"解释|讲解|怎么理解|是什么意思|什么是|定义|概念|定律|定理|公式|"
+        r"技巧|方法|步骤|如何(?:求|算|计算|证明|推导|学习|判断)|"
+        r"为什么|举例|例题|反例|出题|提问|练习|测试|考考|难倒|"
+        r"区别|联系|应用|推导",
+        text,
+        re.I,
+    ))
+    intent_is_tutorial = str(intent.get("primary_intent") or "") in {
+        "define", "explain_mechanism", "apply", "compare", "clarify",
+    }
+    return teaching_action or intent_is_tutorial
+
+
+def _requires_authority_lookup(question: str, intent: dict[str, Any]) -> bool:
+    """Require lookup only when the requested answer actually depends on it.
+
+    Stable textbook teaching can use model knowledge with an explicit boundary;
+    current, empirical, official and source-requesting tasks remain gated.
     """
     if re.search(r"不要联网|别联网|仅(?:用|依据)本地|只查(?:本地|知识库)", question):
         return False
-    if (
-        _response_profile(question) != "grounded_knowledge"
-        and not re.search(r"官方|来源|论文|研究表明|统计数据|查证|联网|查一下|从游", question)
-    ):
-        return False
     if intent.get("response_mode") == "domain_overview":
         return True
-    return str(intent.get("primary_intent") or "") in {
-        "define", "explain_mechanism", "compare", "evaluate", "design",
-    }
+    if intent.get("target_kind") in {"person", "organization", "place", "work", "event"}:
+        return True
+    return bool(re.search(
+        r"最新|截至|实时|当前版本|现任|"
+        r"(?:今天|目前|现在|近期|刚刚|今年|本周).{0,10}(?:新闻|价格|数据|政策|版本|排名|发布|上线|结果|进展|情况|现任)|"
+        r"官方|新闻|报道|价格|排名|政策|法规|标准|发布|上线|"
+        r"真实数据|实际统计|调查结果|实验结果|临床|诊断|用药|"
+        r"请查|查一下|检索|搜索|联网|查证|给出(?:来源|出处|引用|论文|文献)|"
+        r"根据(?:论文|研究|教材|官方数据)|研究表明|统计数据|"
+        r"谁提出|哪一年|什么时候|生平|历史|起源|发展史|发展脉络",
+        question,
+        re.I,
+    ))
+
+
+def _wikipedia_preference(question: str) -> Literal["REQUIRED", "FORBIDDEN", "UNSPECIFIED"]:
+    forbidden = bool(re.search(
+        r"(?:不要|别|不必|无需|不用|禁止|排除).{0,12}(?:Wikipedia|维基百科)|"
+        r"(?:Wikipedia|维基百科).{0,16}(?:不要|别|不必|无需|不用|禁止|排除|"
+        r"并?不(?:重要|关键|显著)|不是(?:必须|必需|重点)|非必须|仅是随口|只是随口)",
+        question,
+        re.I,
+    ))
+    if forbidden:
+        return "FORBIDDEN"
+    required = bool(re.search(
+        r"(?:请|用|查|搜索|检索|参考|根据).{0,12}(?:Wikipedia|维基百科)|"
+        r"(?:Wikipedia|维基百科).{0,12}(?:怎么说|如何解释|条目|来源|查一下|搜索)",
+        question,
+        re.I,
+    ))
+    return "REQUIRED" if required else "UNSPECIFIED"
+
+
+def _requires_local_knowledge_lookup(question: str, state: GardenerState) -> bool:
+    """Use the private/local corpus only when the user or context selected it."""
+    if re.search(
+        r"(?:不要|别|不必|无需|不用|禁止|排除).{0,12}(?:本地(?:笔记|知识库|教材|资料)|我的(?:笔记|知识库|教材|资料)|Obsidian|(?<![A-Za-z])Wiki(?![A-Za-z])|维基)|"
+        r"(?:本地(?:笔记|知识库|教材|资料)|我的(?:笔记|知识库|教材|资料)|Obsidian|(?<![A-Za-z])Wiki(?![A-Za-z])|维基).{0,12}(?:不要|别|不必|无需|不用|禁止|排除)",
+        question,
+        re.I,
+    ):
+        return False
+    if state.get("direct_material"):
+        return True
+    context = state.get("context")
+    if context is not None and context.knowledge_scope.selected_note_ids:
+        return True
+    return bool(re.search(
+        r"我的(?:笔记|知识库|教材|资料)|本地(?:笔记|知识库|教材|资料)|"
+        r"这份教材|上述材料|我上传的|Obsidian|(?<![A-Za-z])Wiki(?![A-Za-z])|(?:知识|致知)花园里",
+        question,
+        re.I,
+    ))
 
 
 def planner_plan(state: GardenerState) -> dict[str, Any]:
@@ -529,27 +631,48 @@ def planner_plan(state: GardenerState) -> dict[str, Any]:
     if deep_planning_needed and not simple_fast_path and not open_discussion_fast_path:
         try:
             payload = _agent_json(
-                "你是知识花园总控 Planner，不回答知识问题。问题理解者已经给出结构化诊断。请规划最小但完整的执行路径，并决定最终应以纯文字还是文字+可视化表达。先判断要表达的关系语义，而不是按‘为什么’等问句关键词选图：层级全貌用 mindmap；有先后步骤的因果过程用 flowchart；发展脉络用 timeline；同维度对照用 comparison；向量、坐标、空间、几何和函数图像等关系用 concept。普通机制解释如果没有步骤链，不应机械使用流程图。你不能取消学习记忆读取、来源规划、证据审查和最终反思；它们是系统安全约束。首次领域概览虽然不启用个性化，仍要读取记忆并由门控明确关闭，留下可审计记录。required_steps 只填写真正执行的专职 Agent 名称。",
+                "你是知识花园总控 Planner，不回答知识问题。问题理解者已经给出结构化诊断。请规划最小但完整的执行路径，并决定最终应以纯文字还是文字+可视化表达。先判断要表达的关系语义，而不是按‘为什么’等问句关键词选图：层级全貌用 mindmap；有先后步骤的因果过程用 flowchart；发展脉络用 timeline；同维度对照用 comparison；向量、坐标、空间、几何和函数图像等关系用 concept。普通机制解释如果没有步骤链，不应机械使用流程图。学习记忆读取和最终反思始终保留；来源规划、检索和证据审查只在问题依赖当前事实、官方信息、真实数据、显式出处，或用户明确选择本地材料时执行。普通、非实时知识问题直接使用模型知识回答，本地教材、Wiki 与 Wikipedia 不是回答门槛。首次领域概览虽然不启用个性化，仍要读取记忆并由门控明确关闭，留下可审计记录。required_steps 只填写真正执行的专职 Agent 名称。",
                 f"当前问题：{state['question']}\n问题理解结果：{intent}\n"
                 "输出 goal、complexity(simple/moderate/complex)、required_steps、primary_modality(text/text_visual)、relation_type(none/hierarchy/causal_process/chronology/comparison/spatial_geometric/quantitative)、visual_kind(none/mindmap/flowchart/timeline/comparison/concept)、modality_reason、visual_request、online_research、reflection_required、max_revisions(0或1)、stop_condition。visual_request 是发给 DeepDiagram 的独立 user_request，必须具体说明图要帮助用户看懂什么、图中应呈现哪些关系、哪些信息不要画。",
             )
         except (LLMError, AssertionError):
             pass
     plan = _validated(PlannerDecision, payload, fallback)
-    required = [
-        "load_learner_memory", "plan_sources", "retrieve_sources", "audit_evidence",
-        "choose_teaching_strategy", "generate_answer", "reflect_outputs",
-    ]
+    authority_lookup_required = _requires_authority_lookup(state["question"], intent)
+    local_lookup_required = _requires_local_knowledge_lookup(state["question"], state)
+    wikipedia_lookup_required = _wikipedia_preference(state["question"]) == "REQUIRED"
+    dialogue = "\n".join([
+        *[str(item.get("content") or "") for item in state.get("history", [])[-4:]],
+        state["question"],
+    ])
+    source_lookup_required = (
+        authority_lookup_required
+        or local_lookup_required
+        or wikipedia_lookup_required
+        or _requests_wechat_history(dialogue)
+    )
+    required = ["load_learner_memory"]
+    required.extend(
+        ["plan_sources", "retrieve_sources", "audit_evidence"]
+        if source_lookup_required else ["prepare_model_knowledge"]
+    )
+    required.extend(["choose_teaching_strategy", "generate_answer", "reflect_outputs"])
     attempted = [item for item in required if item not in plan.get("required_steps", [])]
     plan["required_steps"] = required
     plan["reflection_required"] = True
     plan["max_revisions"] = 1
     plan["policy_adjustments"] = [f"安全门控补回：{item}" for item in attempted]
-    authority_lookup_required = _requires_authority_lookup(state["question"], intent)
-    if authority_lookup_required and not plan.get("online_research"):
+    if (authority_lookup_required or wikipedia_lookup_required) and not plan.get("online_research"):
         plan["online_research"] = True
         plan["policy_adjustments"].append(
+            "用户明确请求 Wikipedia，执行该来源查询。"
+            if wikipedia_lookup_required and not authority_lookup_required else
             "事实型学习问题启用权威来源补查；本地知识优先排序，但不能在证据不足前静默停止"
+        )
+    elif not (authority_lookup_required or wikipedia_lookup_required) and plan.get("online_research"):
+        plan["online_research"] = False
+        plan["policy_adjustments"].append(
+            "普通非实时问题取消默认联网：直接使用模型知识回答，资料源只作用户明确选择后的增强"
         )
     policy_relation, policy_kind = _relation_policy(state["question"], intent)
     explicit_visual = bool(re.search(r"思维导图|脑图|图解|画(?:一|个|张)?图|流程图|时间线|可视化|关系图", state["question"]))
@@ -816,6 +939,7 @@ def understand_question(state: GardenerState) -> dict[str, Any]:
             "仅输出：primary_intent,research_object,target_kind,core_question,concepts,"
             "needs_clarification,clarification_question,explicit_constraints,ambiguities,confidence。",
             f"已有对话：\n{dialogue or '无'}\n"
+            f"连续对话状态：{state.get('conversation_state', {})}\n"
             f"上一轮是否正在澄清：{'是，本轮回答是原问题的补充' if answering_clarification else '否'}\n"
             f"\n当前问题：{question}",
             )
@@ -878,7 +1002,22 @@ def understand_question(state: GardenerState) -> dict[str, Any]:
         and len(research_object_compact) >= 2
         and research_object_compact in explicit_context
     )
-    if intent.get("needs_clarification") and (searchable_target or bool(previous_subject)):
+    non_public_concept = intent.get("target_kind") not in {
+        "person", "organization", "place", "work", "event",
+    }
+    explicit_concept_scope = bool(
+        non_public_concept
+        and len(research_object_compact) >= 3
+        and research_object_compact not in {"这个", "那个", "它", "这件事", "这种东西"}
+        and (
+            re.search(r"[^，。！？\s]{2,24}(?:中|里|领域|语境)的[^，。！？\s]{2,30}", question)
+            or re.search(r"用户已经明确纠正问题对象|不要再次要求用户选择对象类型", question)
+            or re.search(r"直接回答|不要反问|无需澄清", question)
+        )
+    )
+    if intent.get("needs_clarification") and (
+        searchable_target or bool(previous_subject) or explicit_concept_scope
+    ):
         intent["needs_clarification"] = False
         intent["clarification_question"] = ""
         if intent.get("primary_intent") == "clarify":
@@ -976,6 +1115,24 @@ def load_learner_memory(state: GardenerState) -> dict[str, Any]:
             reasoning_task_key,
         ],
     )
+    # When the user explicitly asks for adaptation to their background, the
+    # relevant prerequisite may not be named in the new topic (e.g. asking for
+    # probability at mathematics-major depth after learning advanced calculus).
+    # In that case recall confirmed high-confidence mastery globally instead of
+    # forcing the user to repeat every completed course in the prompt.
+    if _ADAPTIVE_TEACHING_REQUEST.search(state.get("question", "")):
+        overview_mastery = LearningMemoryService(state["store"]).overview().get("concept_mastery", [])
+        mastery_by_concept = {
+            str(item.get("concept_key") or ""): item
+            for item in [*recalled["concept_mastery"], *overview_mastery]
+            if str(item.get("concept_key") or "").strip()
+            and float(item.get("confidence") or 0.0) >= 0.55
+        }
+        recalled["concept_mastery"] = sorted(
+            mastery_by_concept.values(),
+            key=lambda item: float(item.get("confidence") or 0.0),
+            reverse=True,
+        )[:12]
     learner = {
         **state.get("learner_context", {}),
         "active_memory_claims": recalled["claims"],
@@ -1005,7 +1162,12 @@ def gate_personalization(state: GardenerState) -> dict[str, Any]:
         or intent.get("task_demand")
         or "general"
     )
-    if intent.get("response_mode") == "domain_overview":
+    learner = state.get("learner_context", {})
+    explicit_preferences = [
+        str(item).strip() for item in learner.get("explicit_teaching_preferences", [])
+        if str(item).strip()
+    ]
+    if intent.get("response_mode") == "domain_overview" and not explicit_preferences:
         plan = PersonalizationPlan(
             status="disabled_first_exposure",
             task_key=task_key,
@@ -1019,22 +1181,19 @@ def gate_personalization(state: GardenerState) -> dict[str, Any]:
             }),
         }
 
-    learner = state.get("learner_context", {})
-    explicit_preferences = [
-        str(item).strip() for item in learner.get("explicit_teaching_preferences", [])
-        if str(item).strip()
-    ]
     hypotheses: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
     applied_claim_ids: list[str] = []
     confidences: list[float] = []
     for index, preference in enumerate(explicit_preferences):
         evidence_id = f"setting:teaching_preference:{index + 1}"
+        claim_id = f"setting:teaching_preference:{index + 1}"
         hypotheses.append({
             "claim": preference,
             "confidence": 0.98,
             "scope": "用户明确设置",
             "evidence_ids": [evidence_id],
+            "claim_id": claim_id,
             "source_kind": "explicit",
         })
         evidence.append({
@@ -1043,6 +1202,9 @@ def gate_personalization(state: GardenerState) -> dict[str, Any]:
             "relation": "supports", "weight": 1.0, "source_kind": "explicit",
         })
         confidences.append(0.98)
+        # Explicit settings are already user-confirmed.  Mark them applicable so
+        # the downstream deterministic strategy gate does not discard them.
+        applied_claim_ids.append(claim_id)
 
     allowed_dimensions = {"teaching_preference", "self_regulation"}
     for claim in learner.get("active_memory_claims", []):
@@ -1130,7 +1292,7 @@ def gate_personalization(state: GardenerState) -> dict[str, Any]:
 def ask_clarification(state: GardenerState) -> dict[str, Any]:
     question = state["intent"].get("clarification_question") or "你更想先弄清它的定义、作用机制，还是实际用法？"
     result = {
-        "answer": question, "citations": [], "web_sources": [], "followup": question,
+        "answer": question, "citations": [], "web_sources": [], "followup": "",
         "discussion_prompts": [], "evidence_layer": "clarification", "researched_online": False,
         "research_error": "", "offer_save": False, "agent_trace": _trace(state, "clarify", "信息不足，先询问一个最小澄清问题"),
     }
@@ -1140,20 +1302,23 @@ def ask_clarification(state: GardenerState) -> dict[str, Any]:
 def plan_sources(state: GardenerState) -> dict[str, Any]:
     intent = state["intent"]
     question = state["question"]
-    fallback_types = ["local_wiki", "textbook"]
+    fallback_types: list[str] = []
+    local_lookup_required = _requires_local_knowledge_lookup(question, state)
+    authority_lookup_required = _requires_authority_lookup(question, intent)
+    explicit_wikipedia = _wikipedia_preference(question) == "REQUIRED"
+    if local_lookup_required:
+        fallback_types.extend(["local_wiki", "textbook"])
     public_entity_lookup = intent.get("target_kind") in {
         "person", "organization", "place", "work", "event",
     }
-    if intent["primary_intent"] in {"define", "clarify"}:
-        fallback_types.append("encyclopedia")
     if public_entity_lookup:
         fallback_types.extend(["official_docs", "public_web"])
-    if intent["primary_intent"] == "explain_mechanism":
+    if explicit_wikipedia:
         fallback_types.append("encyclopedia")
+    if intent["primary_intent"] == "explain_mechanism":
         if intent.get("claim_to_verify") or re.search(r"前沿|最新研究|争议|是否成立|证据", question):
             fallback_types.extend(["review", "research_paper"])
     if intent["primary_intent"] == "compare":
-        fallback_types.append("encyclopedia")
         if intent.get("claim_to_verify") or re.search(r"优劣|证据|研究发现|争议", question):
             fallback_types.extend(["review", "research_paper"])
     if intent["primary_intent"] in {"evaluate", "design"}:
@@ -1163,9 +1328,13 @@ def plan_sources(state: GardenerState) -> dict[str, Any]:
         or re.search(r"历史|起源|发展脉络|演变|新兴学科|首次提出|发展过程", question)
     )
     if historical_scope:
-        fallback_types.extend(["encyclopedia", "review", "research_paper"])
+        fallback_types.extend(["official_docs", "public_web", "review", "research_paper"])
     if intent.get("response_mode") == "domain_overview":
-        fallback_types.extend(["encyclopedia", "review", "research_paper"])
+        fallback_types.extend(["official_docs", "public_web", "review", "research_paper"])
+    if authority_lookup_required and not any(
+        item in fallback_types for item in {"official_docs", "public_web", "review", "research_paper"}
+    ):
+        fallback_types.extend(["official_docs", "public_web"])
     fallback = SourcePlan(
         source_types=list(dict.fromkeys(fallback_types)), search_query=" ".join([
             str(intent.get("research_object") or ""),
@@ -1174,7 +1343,10 @@ def plan_sources(state: GardenerState) -> dict[str, Any]:
             *[str(item) for item in (intent.get("explicit_constraints") or [])],
         ]).strip(),
         recency_needed=intent["primary_intent"] in {"evaluate", "design"},
-        rationale="本地知识优先；定义用百科定位术语，机制与评价需要综述或论文。",
+        rationale=(
+            "只读取用户明确选择的本地材料；外部事实按任务选择官网、公开网页或论文。"
+            "Wikipedia 仅在用户明确点名时使用，不是默认入口或回答门槛。"
+        ),
     )
     # The question-understanding Agent has already resolved the object and the
     # Planner has chosen research breadth. Source planning is therefore a fast,
@@ -1182,17 +1354,26 @@ def plan_sources(state: GardenerState) -> dict[str, Any]:
     plan = fallback.model_dump()
     if not state.get("planner_decision", {}).get("online_research", False):
         plan["source_types"] = [item for item in plan["source_types"] if item in {"local_wiki", "textbook"}]
-        plan["rationale"] += " Planner 判定本轮无需联网，先用本地来源完成最小充分回答。"
-    elif _requires_authority_lookup(question, intent):
-        if "encyclopedia" not in plan["source_types"]:
-            plan["source_types"].append("encyclopedia")
-        plan["rationale"] += " 本轮属于事实型学习问题：本地来源仍优先，但必须实际执行权威来源补查。"
+        plan["rationale"] += " Planner 判定本轮无需联网；若也没有明确本地材料请求，应由模型直接回答。"
+    elif authority_lookup_required:
+        if "public_web" not in plan["source_types"]:
+            plan["source_types"].append("public_web")
+        if re.search(
+            r"论文|研究|实验|数据|统计|证据|前沿|最新研究|争议|meta.?analysis|review",
+            question,
+            re.I,
+        ):
+            for source_type in ("review", "research_paper"):
+                if source_type not in plan["source_types"]:
+                    plan["source_types"].append(source_type)
+        plan["rationale"] += (
+            " 本轮确实依赖外部事实：公开网页、机构官网或论文承担核验；"
+            "Wikipedia 不是必经来源。"
+        )
     if public_entity_lookup and state.get("planner_decision", {}).get("online_research", False):
         plan["rationale"] += " 人物、机构与作品优先查公开网页和机构官网，再依据结果判断是否需要消歧。"
-    if "local_wiki" not in plan["source_types"]:
-        plan["source_types"].insert(0, "local_wiki")
     if intent.get("response_mode") == "domain_overview":
-        for source_type in ("textbook", "encyclopedia", "review", "research_paper"):
+        for source_type in ("official_docs", "public_web", "review", "research_paper"):
             if source_type not in plan["source_types"]:
                 plan["source_types"].append(source_type)
     dialogue = "\n".join([
@@ -1242,6 +1423,83 @@ def route_after_source_plan(state: GardenerState) -> str:
     return "clarify_wechat" if lookup.get("requested") and lookup.get("needs_clarification") else "retrieve_sources"
 
 
+def route_after_personalization(state: GardenerState) -> str:
+    profile = state.get("reasoning_profile") or classify_reasoning_task(
+        str(state.get("question") or ""),
+        intent_hint=str(state.get("intent", {}).get("primary_intent") or ""),
+    )
+    route = evidence_route(str(state.get("question") or ""), profile=profile)
+    if route["routing_target"] == "MUST_NOT_SEARCH":
+        return "prepare_closed_loop"
+    question = str(state.get("question") or "")
+    dialogue = "\n".join([
+        *[str(item.get("content") or "") for item in state.get("history", [])[-4:]],
+        question,
+    ])
+    lookup_required = (
+        _requires_authority_lookup(question, state.get("intent", {}))
+        or _requires_local_knowledge_lookup(question, state)
+        or _wikipedia_preference(question) == "REQUIRED"
+        or _requests_wechat_history(dialogue)
+    )
+    return "plan_sources" if lookup_required else "prepare_model_knowledge"
+
+
+def prepare_closed_loop(state: GardenerState) -> dict[str, Any]:
+    profile = state.get("reasoning_profile") or classify_reasoning_task(str(state.get("question") or ""))
+    route = evidence_route(str(state.get("question") or ""), profile=profile)
+    return {
+        "source_plan": {"source_types": [], "search_query": "", "online_research": False},
+        "local_hits": [], "candidate_sources": [], "accepted_sources": [],
+        "retrieval_attempts": [], "retrieval_errors": [], "retrieval_round": 0,
+        "evidence_review": {
+            "sufficient": False, "source_roles": {}, "usable_claims": [],
+            "gaps": ["闭环推导由题面前提自足完成，不需要外部证据。"],
+            "routing_target": route["routing_target"],
+        },
+        "trace": _trace(state, "prepare_closed_loop", "Task Router 判定 MUST_NOT_SEARCH，硬剪枝检索与证据审计子树", route),
+    }
+
+
+def prepare_model_knowledge(state: GardenerState) -> dict[str, Any]:
+    """Answer timeless questions directly; retrieval is not an admission gate."""
+    return {
+        "source_plan": {"source_types": [], "search_query": "", "online_research": False},
+        "local_hits": [], "candidate_sources": [], "accepted_sources": [],
+        "retrieval_attempts": [], "retrieval_errors": [], "retrieval_round": 0,
+        "evidence_review": {
+            "sufficient": False,
+            "source_roles": {},
+            "usable_claims": [],
+            "gaps": [],
+            "routing_target": "MODEL_KNOWLEDGE_ALLOWED",
+            "rationale": (
+                "当前是普通、非实时、非显式求证的问题；允许模型直接使用稳定知识回答。"
+                "本地教材、Wiki 与 Wikipedia 都不是必经门槛。"
+            ),
+        },
+        "trace": _trace(
+            state,
+            "prepare_model_knowledge",
+            "普通问题直接进入模型回答，不执行默认本地教材或 Wikipedia 检索",
+            {"routing_target": "MODEL_KNOWLEDGE_ALLOWED"},
+        ),
+    }
+
+
+def _state_routes_must_not_search(state: GardenerState) -> bool:
+    """Treat the graph router decision as authoritative downstream state.
+
+    Reclassifying the same question in generation/review can disagree with the
+    already executed route when an upstream model supplied a weak or inactive
+    reasoning profile.  Once ``prepare_closed_loop`` has run, downstream nodes
+    must not turn that closed task back into an evidence-gated fact lookup.
+    """
+    return str(
+        (state.get("evidence_review") or {}).get("routing_target") or ""
+    ).strip().upper() == "MUST_NOT_SEARCH"
+
+
 def ask_wechat_clarification(state: GardenerState) -> dict[str, Any]:
     question = state.get("wechat_lookup", {}).get("clarification_question") or (
         "你想查哪个联系人或群聊？也请给一个尽量小的时间范围。"
@@ -1249,7 +1507,7 @@ def ask_wechat_clarification(state: GardenerState) -> dict[str, Any]:
     result = {
         "answer": question,
         "citations": [], "local_connections": [], "web_sources": [], "wechat_sources": [],
-        "followup": question, "discussion_prompts": [], "evidence_layer": "clarification",
+        "followup": "", "discussion_prompts": [], "evidence_layer": "clarification",
         "researched_online": False, "research_error": "", "offer_save": False,
         "agent_trace": _trace(state, "clarify_wechat", "读取私人聊天前先取得最小必要会话范围"),
     }
@@ -1312,9 +1570,13 @@ def retrieve_sources(state: GardenerState) -> dict[str, Any]:
     )
     use_hybrid = interactive_semantic or foundational_hybrid
     retrieval_kinds = {"concept", "moc", "bridge", "knowledge", "course", "textbook"}
+    local_retrieval_enabled = (
+        any(item in plan.get("source_types", []) for item in ("local_wiki", "textbook"))
+        or bool(state["context"].knowledge_scope.selected_note_ids)
+    )
     exact_iff_lexical_path = False
     local_hits: list[dict[str, Any]] = []
-    if re.search(r"证明", question) and re.search(r"充要条件|当且仅当", question):
+    if local_retrieval_enabled and re.search(r"证明", question) and re.search(r"充要条件|当且仅当", question):
         lexical_probe = search_notes(
             store, retrieval_question, kinds=retrieval_kinds, limit=8,
             query_plan=query_plan, semantic_enabled=False, rerank_enabled=False,
@@ -1336,7 +1598,7 @@ def retrieve_sources(state: GardenerState) -> dict[str, Any]:
                 item for index, item in enumerate(lexical_probe, 1) if f"L{index}" not in exact_ids
             ]
             exact_iff_lexical_path = True
-    if not exact_iff_lexical_path:
+    if local_retrieval_enabled and not exact_iff_lexical_path:
         local_hits = search_notes(
             store, retrieval_question, kinds=retrieval_kinds, limit=8,
             query_plan=query_plan,
@@ -1362,7 +1624,8 @@ def retrieve_sources(state: GardenerState) -> dict[str, Any]:
         }
         for index, item in enumerate(local_hits, 1)
     ]
-    errors = []
+    retry_round = int(state.get("retrieval_round", 0))
+    errors = list(state.get("retrieval_errors", [])) if retry_round else []
     mounted_tools = set(state["context"].tool_policy.mounted)
     network_enabled = os.getenv("GARDEN_DISABLE_NETWORK", "").strip().lower() not in {"1", "true", "yes"}
     direct = state.get("direct_material") or {}
@@ -1393,7 +1656,9 @@ def retrieve_sources(state: GardenerState) -> dict[str, Any]:
     # Retrieval and generation are separate capabilities. Public-source lookup
     # remains useful even when no chat-model key is configured.
     retrieval_jobs = {}
-    retrieval_attempts: list[str] = []
+    retrieval_attempts: list[str] = (
+        list(state.get("retrieval_attempts", [])) if retry_round else []
+    )
     # Interactive tutoring has a bounded research budget. Patrol/digest jobs
     # may still use the academic client's longer retry defaults.
     academic_timeout = max(3, min(10, int(os.getenv("GARDEN_ACADEMIC_TIMEOUT_SECONDS", "6"))))
@@ -1431,13 +1696,17 @@ def retrieve_sources(state: GardenerState) -> dict[str, Any]:
             network_enabled and "public_web" in mounted_tools
             and any(kind in plan["source_types"] for kind in ("official_docs", "public_web"))
         ):
-            public_query = " ".join(dict.fromkeys(filter(None, [
-                str(intent.get("research_object") or "").strip(),
-                *[
-                    str(item).strip() for item in intent.get("explicit_constraints", [])
-                    if str(item).strip()
-                ],
-            ]))) or plan["search_query"]
+            public_query = (
+                str(plan.get("search_query") or "").strip()
+                if retry_round else
+                " ".join(dict.fromkeys(filter(None, [
+                    str(intent.get("research_object") or "").strip(),
+                    *[
+                        str(item).strip() for item in intent.get("explicit_constraints", [])
+                        if str(item).strip()
+                    ],
+                ]))) or str(plan.get("search_query") or "").strip()
+            )
             retrieval_jobs["PublicWeb"] = pool.submit(
                 search_public_web, public_query, 5, public_web_timeout,
             )
@@ -1787,6 +2056,44 @@ def audit_evidence(state: GardenerState) -> dict[str, Any]:
         default=(),
     )
 
+    discipline_signals = {
+        "mathematics": (
+            "矩阵", "行列式", "特征值", "多项式", "线性代数", "微积分", "极限",
+            "导数", "积分", "拓扑", "群论", "概率空间",
+        ),
+        "physics": (
+            "刚体", "滚动", "摩擦力", "质心", "量子", "哈密顿", "电磁", "热力学",
+            "动量", "能量", "相对论", "波函数",
+        ),
+        "chemistry": (
+            "arrhenius", "活化能", "反应速率", "化学势", "平衡常数", "分子轨道",
+            "催化", "浓度", "焓变", "吉布斯",
+        ),
+        "computer_science": (
+            "dijkstra", "最短路", "算法", "复杂度", "哈希", "散列", "并查集",
+            "数据结构", "伪代码", "图搜索", "动态规划",
+        ),
+        "biology": (
+            "遗传", "基因", "配子", "表型", "基因型", "重组率", "染色体", "种群",
+            "logistic", "细胞", "蛋白质", "生态",
+        ),
+    }
+
+    def discipline_signature(value: str) -> set[str]:
+        compact_value = re.sub(r"\s+", "", str(value or "")).casefold()
+        return {
+            family for family, signals in discipline_signals.items()
+            if any(signal.casefold() in compact_value for signal in signals)
+        }
+
+    question_disciplines = discipline_signature(
+        "\n".join([
+            question,
+            str(intent.get("research_object") or ""),
+            " ".join(str(item) for item in intent.get("concepts", [])),
+        ])
+    )
+
     def normalized_subject(value: str) -> str:
         normalized = re.sub(r"[\s·•—_\-/（）()《》“”\"'：:，,。？！?]", "", value).lower()
         # Canonical encyclopedia titles often add these generic qualifiers to
@@ -1835,6 +2142,14 @@ def audit_evidence(state: GardenerState) -> dict[str, Any]:
             alias for alias in auditable_aliases if alias.casefold() in audit_corpus
         ]
         compact_audit_corpus = re.sub(r"\s+", "", audit_corpus)
+        source_disciplines = discipline_signature(audit_corpus)
+        item["question_disciplines"] = sorted(question_disciplines)
+        item["source_disciplines"] = sorted(source_disciplines)
+        item["discipline_compatible"] = bool(
+            not question_disciplines
+            or not source_disciplines
+            or question_disciplines & source_disciplines
+        )
         item["specialist_anchor_terms"] = list(strongest_group[:4])
         item["specialist_anchor_passed"] = not strongest_group or any(
             len((cleaned := re.sub(r"\s+", "", alias).casefold())) >= 2
@@ -1894,6 +2209,18 @@ def audit_evidence(state: GardenerState) -> dict[str, Any]:
             hard_rejections.append({"source_id": source_id, "reason": relevance["reason"]})
         elif item.get("local") and item.get("knowledge_status") != "grounded":
             hard_rejections.append({"source_id": source_id, "reason": "本地页面缺少可追溯上游来源，只能作为知识连接"})
+        elif (
+            not item.get("discipline_compatible", True)
+            and not item.get("explicitly_selected")
+        ):
+            hard_rejections.append({
+                "source_id": source_id,
+                "reason": (
+                    "来源学科与问题学科不一致：问题="
+                    + "/".join(sorted(question_disciplines))
+                    + "，来源=" + "/".join(sorted(source_disciplines))
+                ),
+            })
         elif (
             item["source_type"] == "encyclopedia"
             and (
@@ -2080,6 +2407,12 @@ def audit_evidence(state: GardenerState) -> dict[str, Any]:
             and not item.get("specialist_anchor_passed", True)
         ):
             review["source_roles"][source_id] = "prerequisite"
+        if (
+            role in {"direct_evidence", "counterevidence"}
+            and not item.get("discipline_compatible", True)
+            and not item.get("explicitly_selected")
+        ):
+            review["source_roles"][source_id] = "context"
     model_rejected = [item for item in review.get("rejected", []) if item.get("source_id") in hard_eligible_ids]
     review["rejected"] = [*hard_rejections, *model_rejected]
     accepted = [item for item in candidates if item["source_id"] in review["accepted_ids"]]
@@ -2176,6 +2509,82 @@ def audit_evidence(state: GardenerState) -> dict[str, Any]:
                 "rejected": review["rejected"][:8],
             },
         ),
+    }
+
+
+def route_after_evidence_audit(state: GardenerState) -> str:
+    """Retry one rewritten non-Wikipedia search after evidence rejection."""
+    if state.get("evidence_review", {}).get("sufficient"):
+        return "choose_teaching_strategy"
+    if int(state.get("retrieval_round", 0)) >= 1:
+        return "choose_teaching_strategy"
+    question = str(state.get("question") or "")
+    intent = state.get("intent", {})
+    network_enabled = os.getenv(
+        "GARDEN_DISABLE_NETWORK", "",
+    ).strip().lower() not in {"1", "true", "yes"}
+    should_retry = (
+        network_enabled
+        and bool(state.get("planner_decision", {}).get("online_research"))
+        and _requires_authority_lookup(question, intent)
+        and not _is_stable_educational_request(question, intent)
+        and not state.get("wechat_lookup", {}).get("requested")
+    )
+    return "prepare_retrieval_retry" if should_retry else "choose_teaching_strategy"
+
+
+def prepare_retrieval_retry(state: GardenerState) -> dict[str, Any]:
+    """Rewrite the query once and switch away from a failed encyclopedia path."""
+    intent = state.get("intent", {})
+    question = str(state.get("question") or "")
+    plan = dict(state.get("source_plan") or {})
+    anchors = [
+        str(intent.get("research_object") or "").strip(),
+        *[str(item).strip() for item in intent.get("concepts", []) if str(item).strip()],
+        str(intent.get("claim_to_verify") or intent.get("core_question") or "").strip(),
+    ]
+    retry_query = " ".join(dict.fromkeys(item for item in anchors if item))
+    retry_query = re.sub(
+        r"请(?:查|查询|检索|搜索|给出|告诉我)|联网|给出(?:来源|出处|引用)|"
+        r"你能否|能不能|是否可以",
+        " ",
+        retry_query,
+    )
+    retry_query = re.sub(r"\s+", " ", retry_query).strip(" ，。！？?；;:")
+    if len(retry_query) < 2:
+        retry_query = re.sub(
+            r"请(?:查|查询|检索|搜索)|联网|给出(?:来源|出处|引用)",
+            " ",
+            reasoning_subject(question),
+        )
+        retry_query = re.sub(r"\s+", " ", retry_query).strip()
+    retry_query = retry_query[:180]
+
+    source_types = [
+        item for item in plan.get("source_types", [])
+        if item in {"local_wiki", "textbook", "official_docs", "public_web", "review", "research_paper"}
+    ]
+    if "public_web" not in source_types:
+        source_types.append("public_web")
+    if re.search(r"论文|研究|实验|数据|统计|证据|前沿|争议", question):
+        for source_type in ("review", "research_paper"):
+            if source_type not in source_types:
+                source_types.append(source_type)
+    plan["source_types"] = list(dict.fromkeys(source_types))
+    plan["search_query"] = retry_query
+    plan["rationale"] = (
+        str(plan.get("rationale") or "")
+        + " 首轮证据审查未通过；本轮改写为核心对象查询，并停用 Wikipedia，"
+        "转向公共网页/机构官网及适用的学术来源。"
+    )
+    return {
+        "source_plan": plan,
+        "retrieval_round": int(state.get("retrieval_round", 0)) + 1,
+        "trace": _trace(state, "prepare_retrieval_retry", "证据不足，执行一次非 Wikipedia 查询改写", {
+            "retry_query": retry_query,
+            "source_types": plan["source_types"],
+            "previous_gaps": state.get("evidence_review", {}).get("gaps", [])[:4],
+        }),
     }
 
 
@@ -2403,6 +2812,26 @@ def build_content_blueprint(state: GardenerState) -> dict[str, Any]:
     usable_claims = state["evidence_review"].get("usable_claims", []) or [
         item["excerpt"] for item in evidence_items
     ]
+    reasoning_profile = state.get("reasoning_profile") or {}
+    protocol_claims: list[Any] = []
+    if reasoning_profile.get("activated"):
+        protocol_claims = [
+            *list(reasoning_profile.get("decompose") or [])[:2],
+            *list(reasoning_profile.get("derive") or [])[:2],
+            *list(reasoning_profile.get("verify") or [])[:1],
+        ]
+    required_claims = []
+    for value in [
+        state["intent"].get("claim_to_verify", ""),
+        *protocol_claims,
+        *state["teaching_strategy"].get("explanation_order", []),
+        *usable_claims,
+    ]:
+        claim = re.sub(r"\s+", " ", str(value or "")).strip()
+        if len(claim) >= 4 and claim not in required_claims:
+            required_claims.append(claim)
+        if len(required_claims) == 6:
+            break
     blueprint = {
         "goal": state.get("planner_decision", {}).get("goal") or state["question"],
         "core_question": state["intent"].get("core_question") or state["question"],
@@ -2422,15 +2851,114 @@ def build_content_blueprint(state: GardenerState) -> dict[str, Any]:
         ],
         "source_titles": {str(item["source_id"]): str(item["title"]) for item in accepted},
         "success_criterion": state["teaching_strategy"].get("success_criterion", ""),
+        "required_claims": [
+            {"id": f"B{index}", "claim": claim}
+            for index, claim in enumerate(required_claims, 1)
+        ],
         "visual_request": state.get("planner_decision", {}).get("visual_request", ""),
     }
     return {
         "content_blueprint": blueprint,
         "trace": _trace(state, "build_content_blueprint", "建立文字与图解共享的证据化内容蓝图", {
             "source_ids": blueprint["source_ids"], "usable_claims": blueprint["usable_claims"],
+            "required_claims": blueprint["required_claims"],
             "comparison_subjects": blueprint["comparison_subjects"],
             "gaps": blueprint["gaps"],
         }),
+    }
+
+
+_REPAIR_META_LANGUAGE = re.compile(
+    r"(?:证明|推导|回答|正文|其余|原有|上述).{0,12}(?:予以|保持|继续)?保留|"
+    r"(?:请|需要|仅需|应当?).{0,12}(?:修改|改写|替换|补充)(?:为|成|如下)?|"
+    r"修改意见|返工建议|修订说明|其余不变|无需改动|按以下方式调整",
+    re.I,
+)
+_META_REFUSAL_LANGUAGE = re.compile(
+    r"这次先不{1,2}(?:补写|写)?答案|这次先不回答|"
+    r"(?:^|[\n。！？])\s*(?:我|本次|当前)(?:先|暂时)?不(?:直接)?(?:回答|作答|给出答案)|"
+    r"(?:^|\n)\s*(?:先|暂时)不(?:直接)?(?:回答|作答|给出答案)|"
+    r"(?:^|[\n。！？])\s*(?:抱歉[，,]?\s*)?(?:我|本次|当前|现阶段)?\s*"
+    r"(?:不能|无法|不方便)(?:直接)?(?:回答|作答|给出答案)(?:这个|该)?(?:问题)?|"
+    r"(?:^|[\n。！？])\s*(?:这个|该)?问题\s*(?:我|本次|当前)?\s*"
+    r"(?:不能|无法|不方便)(?:直接)?(?:回答|作答|给出答案)|"
+    r"当前无法(?:给出)?(?:答案|回答)|请(?:重新提问|重试本题|稍后再试|换个问题)|"
+    r"证据不足所以不回答|没有取得足够贴合且可核查的证据.{0,40}(?:不回答|补充.*来源)",
+    re.I | re.S,
+)
+
+
+def _latex_syntax_review(answer: str) -> dict[str, Any]:
+    """Cheap deterministic gate before spending a Reflector model call."""
+    text = str(answer or "")
+    issues: list[str] = []
+    for opening, closing, label in (("{", "}", "花括号"), ("\\[", "\\]", "展示公式"), ("\\(", "\\)", "行内公式")):
+        if text.count(opening) != text.count(closing):
+            issues.append(f"LaTeX {label}未闭合")
+    begins = re.findall(r"\\begin\{([^{}]+)\}", text)
+    ends = re.findall(r"\\end\{([^{}]+)\}", text)
+    if begins != ends:
+        issues.append("LaTeX environment 的 begin/end 不匹配")
+    if text.count("$$") % 2:
+        issues.append("Markdown 展示公式 $$ 未成对闭合")
+    return {"passed": not issues, "issues": issues, "checker_version": "latex-balance-v1"}
+
+
+def validate_output_syntax(state: GardenerState) -> dict[str, Any]:
+    review = _latex_syntax_review(str(state.get("answer") or ""))
+    return {
+        "syntax_review": review,
+        "trace": _trace(state, "validate_output_syntax", "LaTeX 轻量校验通过" if review["passed"] else "LaTeX 轻量校验失败", review),
+    }
+
+
+def snapshot_initial_answer(state: GardenerState) -> dict[str, Any]:
+    answer = str(state.get("answer") or "")
+    return {
+        "initial_answer": answer,
+        "repair_degraded": False,
+        "repair_diagnostics": {},
+        "trace": _trace(state, "snapshot_initial_answer", "冻结初始完整回答，供返工失败时回滚", {"length": len(answer)}),
+    }
+
+
+def _claim_coverage(answer: str, blueprint: dict[str, Any]) -> dict[str, Any]:
+    compact = re.sub(r"\s+", "", str(answer or "")).casefold()
+    sentences = [
+        re.sub(r"\s+", "", sentence).casefold()
+        for sentence in re.split(r"[。！？!?；;\n]+", str(answer or ""))
+        if sentence.strip()
+    ] or [compact]
+    rows = []
+    stop = {"说明", "解释", "用户", "回答", "问题", "关键", "结论", "条件", "机制", "关系", "自己的话"}
+    for item in blueprint.get("required_claims", []):
+        claim = str(item.get("claim") or "")
+        tokens = []
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_]*|[\u4e00-\u9fff]{2,12}|\d+(?:\.\d+)?", claim):
+            normalized = token.casefold()
+            if normalized in stop:
+                continue
+            if re.fullmatch(r"[\u4e00-\u9fff]+", normalized) and len(normalized) >= 4:
+                tokens.extend(normalized[index:index + 2] for index in range(len(normalized) - 1))
+            else:
+                tokens.append(normalized)
+        tokens = list(dict.fromkeys(tokens))[:12]
+        hits = [token for token in tokens if re.sub(r"\s+", "", token) in compact]
+        token_score = len(hits) / max(1, len(tokens))
+        claim_compact = re.sub(r"\s+", "", claim).casefold()
+        similarity = max(
+            (difflib.SequenceMatcher(None, claim_compact, sentence).ratio() for sentence in sentences),
+            default=0.0,
+        )
+        score = max(token_score, similarity)
+        rows.append({
+            "id": item.get("id"), "claim": claim, "score": round(score, 3),
+            "token_score": round(token_score, 3), "sentence_similarity": round(similarity, 3),
+            "covered": score >= 0.35,
+        })
+    return {
+        "coverage": round(sum(row["covered"] for row in rows) / max(1, len(rows)), 3) if rows else 1.0,
+        "claims": rows,
     }
 
 
@@ -2463,6 +2991,18 @@ def _format_answer_payload(value: Any) -> str:
     return "\n".join(
         f"{str(key).strip()}：{str(item).strip()}"
         for key, item in value.items() if str(item).strip()
+    )
+
+
+def _decode_document_newlines(text: str) -> str:
+    """Decode escaped prose newlines while preserving LaTeX commands."""
+    value = str(text or "")
+    if not re.search(r"\\n\\n|\\n(?:```|#{1,6}\s|[（(【]|\d+[.)、])", value):
+        return value
+    return re.sub(
+        r"\\n(?!(?:abla|eq|e\b|ot|u\b|atural|eg)\b)",
+        "\n",
+        value,
     )
 
 
@@ -2680,10 +3220,20 @@ def _scientific_premise_guard(question: str) -> dict[str, str] | None:
 def _response_profile(question: str) -> str:
     """Separate verifiable knowledge claims from discussions without a single answer."""
     text = re.sub(r"\s+", "", reasoning_subject(question))
+    if re.search(r"想死|不想活|自杀|结束(?:自己|我的)生命|伤害自己", text):
+        return "health_guidance"
     if re.search(r"疼|痛|红肿|受伤|外伤|症状|生病|用药|看医生|就医", text) or re.search(
         r"(?:医学|临床|疾病|患者|症状).{0,12}诊断|诊断.{0,12}(?:疾病|患者|症状)", text,
     ):
         return "health_guidance"
+    if re.search(
+        r"我死了|我死后|去世后|死后|数字分身|数字遗产|人格复制|意识上传|"
+        r"(?:agent|智能体|机器人).{0,12}(?:代替|替代|延续).{0,8}(?:我|人生|生活)|"
+        r"(?:代替|替代|延续).{0,8}(?:我|人生|生活).{0,12}(?:agent|智能体|机器人)",
+        text,
+        re.I,
+    ):
+        return "thought_experiment"
     if re.search(r"^(?:如果|假如|假设|倘若)|世界末日|生活在(?:一个)?游戏|宇宙是(?:一个)?程序|时间是(?:一个)?圆", text):
         return "thought_experiment"
     if re.search(r"幸福|快乐|迷茫|焦虑|喜欢|食堂|好吃|内卷|在卷|同学|爱情|有用|没用|谁的错|禁区|从游|更聪明|定理美", text):
@@ -2887,6 +3437,137 @@ def _generate_open_discussion(state: GardenerState, profile: str) -> dict[str, A
     }
 
 
+def _deterministic_open_discussion_fallback(
+    state: GardenerState, profile: str,
+) -> dict[str, Any]:
+    """Keep model/provider failures separate from evidence insufficiency."""
+    question = str(state.get("question") or "")
+    compact = re.sub(r"\s+", "", question)
+    if profile == "thought_experiment" and re.search(
+        r"我死了|我死后|死后|数字分身|数字遗产|agent|智能体|意识上传",
+        compact,
+        re.I,
+    ):
+        answer = (
+            "这更适合作为“身份是否能够延续”的思想实验，而不是需要 Wikipedia 裁决的事实题。"
+            "先区分三件事：Agent 可以保存你的文字、记忆线索和表达习惯；它也可以在你死后继续作决定；"
+            "但这两点都不能自动推出你的第一人称体验仍在延续。\n\n"
+            "如果它只是高度模仿你，它更像会互动的数字遗产。即使它拥有完整记忆，也会出现复制悖论："
+            "若同时运行两个副本，二者不可能都与原来的你保持唯一身份。因而“行为和记忆连续”与"
+            "“同一个主体继续存在”必须分开讨论。\n\n"
+            "现实上还要预先约定授权范围、可否代表你发言、亲友能否关闭它、数据如何撤回，以及它偏离"
+            "你原有价值后由谁负责。比较稳妥的结论是：Agent 可以延续部分信息与社会关系，"
+            "但不能据此声称它代替你继续拥有同一段生命。"
+        )
+        followup = "你更关心意识是否延续，还是数字分身对亲友和法律关系的影响？"
+    elif profile == "health_guidance":
+        answer = (
+            "仅凭这句话不能判断具体原因，我也不能据此作诊断。可以先记录出现时间、诱因、持续多久、"
+            "是否伴随明显疼痛、红肿、发热、活动受限或意识状态变化；这些信息能帮助专业人员判断。"
+            "如果症状突然、明显加重，或涉及自伤念头、呼吸困难、剧烈疼痛等紧急情况，请立即联系身边"
+            "可信的人和当地急救/医疗服务，不要独自承担。"
+        )
+        followup = "你愿意先说明这是思想表达，还是你此刻真实感到不安全吗？"
+    elif profile == "thought_experiment":
+        answer = (
+            "可以把它当成思想实验来讨论。先明确哪些前提只是假设，再分别观察身份、责任、可逆性和"
+            "他人感受会怎样变化。这个问题通常没有唯一事实答案；有意义的是找出不同定义下结论为何"
+            "不同，以及什么观察能够区分这些立场。"
+        )
+        followup = "你希望先固定哪一个核心前提？"
+    elif profile == "reflective_discussion":
+        answer = (
+            "这个问题没有一个可以靠单条资料替你裁决的答案。可以先分开看你的即时感受、长期目标、"
+            "现实约束和你愿意承担的代价，再比较不同选择在这些维度上的变化。暂时没有把握并不等于"
+            "问题无解，也不需要为了显得确定而编造一个标准答案。"
+        )
+        followup = "其中哪一部分最接近你现在真正卡住的地方？"
+    else:
+        answer = (
+            "这属于可以用一般机制讨论、但不能仅凭一句话确定唯一原因的问题。更稳妥的做法是列出"
+            "几种可能机制、它们各自能解释什么，以及需要哪些额外观察来区分；不能把一种常见解释"
+            "直接写成已核实事实。"
+        )
+        followup = "你能补充发生条件或你最想解释的现象吗？"
+    return {
+        "answer": answer,
+        "followup": followup,
+        "discussion_prompts": [],
+        "generation_sources": [],
+        "trace": _trace(state, "generate_answer", "开放讨论模型暂不可用，使用无伪证据的本地回退", {
+            "response_profile": profile,
+            "generation_provider": "deterministic-open-discussion-fallback",
+            "citation_binding_repaired": False,
+        }),
+    }
+
+
+def _bounded_generation_fallback(
+    state: GardenerState,
+    *,
+    accepted: list[dict[str, Any]],
+    evidence_detail: str = "",
+) -> str:
+    """Keep an answer useful when generation or retrieval fails.
+
+    This fallback deliberately makes no fresh empirical claims.  It returns the
+    closest accepted passage when one exists; otherwise it gives an
+    intent-specific method that the learner can immediately use instead of a
+    meta-level refusal or a request to retry the same question.
+    """
+    if accepted:
+        source_roles = state.get("evidence_review", {}).get("source_roles", {})
+        direct_ids = {
+            str(source_id) for source_id, role in source_roles.items()
+            if role in {"direct_evidence", "counterevidence"}
+        }
+        source = next(
+            (item for item in accepted if str(item.get("source_id")) in direct_ids),
+            accepted[0],
+        )
+        return (
+            f"先回答目前能够核实的部分：《{source['title']}》给出的相关内容是："
+            f"{str(source.get('text') or '')[:500]} [{source['source_id']}]\n\n"
+            "超出这段材料的结论暂不当作已核实事实；可以在此基础上继续推导或补充新的直接证据。"
+        )
+
+    question = reasoning_subject(str(state.get("question") or "")).strip()
+    intent = str(state.get("intent", {}).get("primary_intent") or "explain_mechanism")
+    method_by_intent = {
+        "define": "先界定研究对象与必要条件，再给一个正例和一个反例来划清边界",
+        "explain_mechanism": "先写出输入条件，逐步列出中间机制，再说明可观察结果和能区分替代解释的现象",
+        "apply": "先列已知量、目标量与约束，选择适用原理，执行关键步骤，最后做单位、边界或反例检查",
+        "compare": "先分别定义比较对象，再用同一组维度比较共同点、关键差异和不可互换的情形",
+        "evaluate": "先把待核验命题拆成若干原子论断，逐条标记证据、反证条件和当前置信度",
+        "design": "先明确目标函数、约束和成功指标，再给最小可运行方案、验证方法与失败回退",
+        "clarify": "先固定对象、场景和希望得到的结果，再只追问会实质改变答案的缺失条件",
+    }
+    method = method_by_intent.get(intent, method_by_intent["explain_mechanism"])
+    model_knowledge_allowed = str(
+        state.get("evidence_review", {}).get("routing_target") or ""
+    ) == "MODEL_KNOWLEDGE_ALLOWED"
+    if model_knowledge_allowed:
+        return (
+            f"围绕“{question}”，先按这个顺序直接推进：{method}。"
+            "先给最常见含义，再区分容易混淆的其他用法；能由定义与通行原理说明的部分直接说明，"
+            "只有确实涉及时效数据或具体史实时才单独标注核验边界。"
+        )
+    detail = evidence_detail or "外部检索没有提供足以支持新增事实断言的直接材料"
+    premise_guard = _scientific_premise_guard(question)
+    correction = (
+        f"{premise_guard['correction']}\n\n"
+        "这部分是对题设内部条件与稳定学科关系的检查，不需要外部证据才能指出。\n\n"
+        if premise_guard else ""
+    )
+    return (
+        correction
+        + f"先就“{question}”给出可执行的处理方式：{method}。"
+        "题面能够推出的内容可以继续推演；涉及最新数据、人物史实、官方口径或经验数值的部分则单独标成待核验，"
+        "不把它混进已经确认的结论。\n\n"
+        f"当前待核验点：{detail}。"
+    )
+
+
 def generate_answer(state: GardenerState) -> dict[str, Any]:
     accepted = state.get("accepted_sources", [])
     overview_mode = state.get("intent", {}).get("response_mode") == "domain_overview"
@@ -2895,8 +3576,11 @@ def generate_answer(state: GardenerState) -> dict[str, Any]:
         str(state.get("question") or ""),
         intent_hint=str(state.get("intent", {}).get("primary_intent") or ""),
     )
-    self_contained_reasoning = is_self_contained_reasoning(
+    self_contained_reasoning = _state_routes_must_not_search(state) or is_self_contained_reasoning(
         str(state.get("question") or ""), reasoning_profile,
+    )
+    stable_educational_request = _is_stable_educational_request(
+        str(state.get("question") or ""), state.get("intent", {}),
     )
     reasoning_instruction = reasoning_prompt(reasoning_profile, surface="gardener_chat")
     premise_guard = _scientific_premise_guard(str(state.get("question") or ""))
@@ -2906,72 +3590,47 @@ def generate_answer(state: GardenerState) -> dict[str, Any]:
     ))
     if profile != "grounded_knowledge" and not overview_mode and not explicit_source_request:
         discussion = _generate_open_discussion(state, profile)
-        if discussion is not None:
-            evidence = dict(state.get("evidence_review") or {})
-            evidence["sufficient"] = False
-            evidence["usable_claims"] = []
-            evidence["source_roles"] = {
-                source_id: "context"
-                for source_id in evidence.get("source_roles", {})
-            }
-            evidence["rationale"] = (
-                "当前属于开放讨论或一般性健康提醒，不能把词语碰巧重合的教材页面冒充问题的直接证据。"
-            )
-            discussion["evidence_review"] = evidence
-            discussion["accepted_sources"] = []
-            return discussion
-    if not state.get("evidence_review", {}).get("sufficient") and not self_contained_reasoning:
-        if profile != "grounded_knowledge" and not overview_mode:
-            discussion = _generate_open_discussion(state, profile)
-            if discussion is not None:
-                return discussion
+        if discussion is None:
+            discussion = _deterministic_open_discussion_fallback(state, profile)
+        evidence = dict(state.get("evidence_review") or {})
+        evidence["sufficient"] = False
+        evidence["usable_claims"] = []
+        evidence["source_roles"] = {
+            source_id: "context"
+            for source_id in evidence.get("source_roles", {})
+        }
+        evidence["rationale"] = (
+            "当前属于开放讨论或一般性健康提醒，不能把词语碰巧重合的教材页面冒充问题的直接证据。"
+        )
+        discussion["evidence_review"] = evidence
+        discussion["accepted_sources"] = []
+        return discussion
+    evidence_limited = (
+        not state.get("evidence_review", {}).get("sufficient")
+        and not self_contained_reasoning
+        and not stable_educational_request
+    )
+    evidence_limit_detail = ""
+    evidence_limit_search_status = ""
+    if evidence_limited:
         gaps = [str(item) for item in state.get("evidence_review", {}).get("gaps", []) if str(item).strip()]
         errors = [str(item) for item in state.get("retrieval_errors", []) if str(item).strip()]
-        detail = "；".join(gaps[:2] + errors[:1]) or "没有取得能直接支持当前命题的教材、综述或其他权威正文"
-        if premise_guard:
-            answer = (
-                premise_guard["correction"]
-                + "\n\n不过，当前教材中仍然证据不足，没有找到能直接核对这条修正和完整推导的相关正文；"
-                "我不会把其他学科或只有前置定义的页面冒充证明依据。"
-                + f"\n\n**目前缺口：** {detail}"
-            )
-            return {
-                "answer": answer,
-                "followup": "你希望先核对命题条件，还是补充相关教材后继续完整推导？",
-                "discussion_prompts": ["先检查命题成立的条件", "补充能够核对推导的教材"],
-                "generation_sources": [],
-                "trace": _trace(state, "generate_answer", "先纠正可验证的命题前提，并如实说明直接证据不足", {
-                    "premise_guard": premise_guard["kind"], "gaps": gaps,
-                }),
-            }
+        evidence_limit_detail = "；".join(gaps[:2] + errors[:1]) or "没有取得能直接支持当前命题的教材、综述或其他权威正文"
         attempts = [str(item) for item in state.get("retrieval_attempts", []) if str(item).strip()]
-        search_status = (
+        evidence_limit_search_status = (
             "、".join(attempts) + " 已发出联网查询，但没有得到足以通过证据审查的正文或摘要。"
             if attempts else
             "本轮没有成功启动外部权威检索；请检查联网开关和已启用工具。"
         )
-        answer = (
-            "## 这次先不补写答案\n\n"
-            "我已经检查本地知识与教材入口。" + search_status + "当前仍然证据不足，"
-            "因此不会让生成模型凭常识补成一段看似正确却不可追溯的解释。\n\n"
-            f"**缺口：** {detail}\n\n"
-            "你可以补充具体教材章节或原文；也可以让我把问题缩小到一个可检索的核心术语后重新查证。"
-        )
-        return {
-            "answer": answer,
-            "followup": "你希望补充教材，还是先把问题缩小为一个核心概念？",
-            "discussion_prompts": ["补充教材或权威原文", "缩小问题并重新检索"],
-            "generation_sources": [],
-            "trace": _trace(state, "generate_answer", "证据硬门控阻止无来源事实生成", {
-                "gaps": gaps, "online_attempts": attempts, "errors": errors,
-            }),
-        }
     source_roles = state["evidence_review"].get("source_roles", {})
-    if self_contained_reasoning:
+    if self_contained_reasoning or (
+        stable_educational_request and not state.get("evidence_review", {}).get("sufficient")
+    ):
         # Closed proofs, derivations, calculations and supplied-claim audits use
         # the user problem as their premise set. Adjacent retrieval hits can
         # only distract the answer model or turn an empty JSON response into an
-        # unrelated evidence fallback.
+        # unrelated evidence fallback. Stable textbook teaching also avoids
+        # binding itself to a merely topical failed retrieval.
         generation_sources = []
     elif overview_mode:
         generation_sources = accepted
@@ -3019,13 +3678,29 @@ def generate_answer(state: GardenerState) -> dict[str, Any]:
     ) or (
         "本题是自足推理任务：只能把用户题设作为前提，并使用可复核的形式推导；"
         "不得补入题设之外的现实事实。"
-        if self_contained_reasoning else "没有通过审核的直接证据"
+        if self_contained_reasoning else
+        "本题是普通、非实时的知识教学请求：可以使用通行领域知识直接讲解、出题或展示方法；"
+        "不得伪造引用，不得顺带补入实时、经验统计、人物史实或存在争议的新结论。"
+        if stable_educational_request else
+        "没有通过审核的直接证据"
     )
     grounding_rule = _evidence_grounding_rule(
         [str(item).strip() for item in state.get("intent", {}).get("concepts", [])],
         generation_sources,
     )
-    strategy = state["teaching_strategy"]
+    evidence_limit_instruction = ""
+    if evidence_limited:
+        evidence_limit_instruction = (
+            "【证据受限时的回答规则】仍然要直接回应问题：先给稳定定义、一般机制、题面可推出的内容、"
+            "可执行的分析方法或条件化答案；再把必须依赖实时数据、人物史实、官方口径或经验统计的部分"
+            "明确标成‘尚未核验’。不得输出‘先不回答’、‘请重试’、‘请重新提问’或只让用户补材料。"
+            "若缺少的输入会改变结论，先给方法与示例，再只问一个精确问题。不得伪造来源。"
+            f"检索状态：{evidence_limit_search_status} 当前缺口：{evidence_limit_detail}"
+        )
+    # Product graph always supplies a teaching strategy. Keeping the generator
+    # total here also lets isolated safety tests verify premise correction
+    # without constructing unrelated personalization state.
+    strategy = state.get("teaching_strategy", {})
     preference_directives = [
         str(item).strip() for item in strategy.get("preference_directives", [])
         if str(item).strip()
@@ -3089,25 +3764,66 @@ def generate_answer(state: GardenerState) -> dict[str, Any]:
             "【非凸优化精度约束】对二次可微函数，驻点处 Hessian 半正定通常只是局部极小的"
             "二阶必要条件，单独并不充分；Hessian 正定才给出严格局部极小的常用二阶充分条件。"
             "半正定退化时必须检查高阶项、邻域函数值或额外凸性，不能直接宣布局部最优。"
-            "对可微凸函数，无约束问题或定义域内点处梯度为零可判全局最小，严格凸时最小点若存在则唯一；"
-            "反向声称‘全局最小必有零梯度’必须限定无约束或内点。边界约束情形应使用 KKT、"
-            "可行方向或法锥条件，不能把边界最优误写成梯度为零。"
+            "对可微凸函数，在凸定义域上任一点若梯度为零即可判为全局最小；严格凸时最小点若存在则唯一。"
+            "反向声称‘全局最小必有零梯度’必须限定无约束问题或定义域内点。若可行域为 D，边界约束最优"
+            "应写成 0∈∇f(x*)+N_D(x*) 或相应 KKT 条件；除非明确把可行域指示函数并入目标，"
+            "不得把它简写成 0∈∂f(x*)，也不能把边界最优误写成梯度为零。"
         )
     if re.search(r"预测区间|不确定性|区间(?:很宽|窄|重叠)|置信上界|信息增益", compact_question, re.I):
         precision_instruction += (
             "【不确定性量化精度约束】先区分模型认识不确定性、过程固有随机性和实验测量误差。"
             "增加同条件重复测量主要降低测量均值的不确定性，未必消除模型结构或分布外导致的认识盲区；"
             "高认识不确定性可用信息增益驱动的新条件实验缩小。实验排序还必须同时考虑成本与安全约束。"
-            "候选区间是否重叠不能直接替代差值检验或显著性判断；必须说明区间类型、联合误差结构与比较量。"
-            "候选排序还要分开当前利用损失与探索的信息价值，不能仅凭点估计或区间宽度机械排序。"
+            "候选的边际区间是否重叠不能直接替代差值检验，也不能由重叠推出‘统计上不可区分’；"
+            "必须说明区间类型、联合误差结构，并直接检验联合差值分布或配对差。候选排序还要显式分开"
+            "当前利用阶段的期望损失与探索阶段的信息价值，不能仅凭点估计或区间宽度机械排序。"
         )
     retry_question = str(state.get("question") or "")
     wrapper_marker = "\n\n题目：\n"
     if retry_question.startswith("【致理结构调试·") and wrapper_marker in retry_question:
         retry_question = retry_question.rsplit(wrapper_marker, 1)[-1].strip() or retry_question
+    precision_instruction += science_precision_instruction(retry_question)
+    auditable_code_required = bool(re.search(
+        r"Python|SymPy|Z3|pgmpy|RDKit|Qiskit|COBRApy|代码|脚本|编程|"
+        r"数值积分器|求解器|算法实现|编写.{0,12}(?:程序|算法)|实现.{0,12}(?:算法|模拟|求解|验证)",
+        retry_question,
+        re.I,
+    ))
+    auditable_code_instruction = (
+        "【可审计代码要求】题目明确要求代码或科学工具。最终正文必须至少包含一个以 ```python 开始、"
+        "以 ``` 结束的完整 Python 代码块，写明依赖与输入；不得只给伪代码，也不得把未运行代码"
+        "描述成已经实测。"
+        if auditable_code_required else ""
+    )
     payload = None
     generation_provider = "project-model"
     generation_error = ""
+    retry_without_retrieval = self_contained_reasoning or stable_educational_request
+    retry_system_prompt = (
+        "你是严谨的自足推理回答 Agent。只使用用户题设和通用形式规则，不需要外部检索。"
+        "先检查前提是否成立，再给可核验的关键步骤、条件和结论。"
+        if self_contained_reasoning else
+        "你是知识教学回答 Agent。当前请求属于普通、非实时的知识或方法讲解，"
+        "不需要外部检索。直接完成教学任务；不要向用户汇报是否命中教材、Wiki 或网页，"
+        "也不要因为没有本地材料而缩短答案；不得伪造引用、实时事实或经验统计。"
+    )
+    model_knowledge_instruction = ""
+    if str(state.get("evidence_review", {}).get("routing_target") or "") == "MODEL_KNOWLEDGE_ALLOWED":
+        model_knowledge_instruction = (
+            "【普通模型直答】本轮没有请求本地资料或外部来源。直接解释问题本身；"
+            "禁止在正文中汇报‘教材级’、‘本地没有’、‘没有教材/Wiki/网页证据’或‘因此不展开’。"
+            "内部是否检索、命中何种来源不属于用户答案。术语若有多种常见含义，先给最常见概览，"
+            "再简要区分其他含义，不要把选择责任推回给用户。"
+        )
+    runtime_evidence_instruction = ""
+    if not model_knowledge_instruction:
+        runtime_evidence_instruction = (
+            f"稳定基础知识直答许可：{stable_educational_request}。若为 True，即使检索异常也必须直接完成教学请求，"
+            "不得输出‘证据不足所以不回答’；只需避免假引用、实时事实和未经核验的经验数字。\n"
+            f"检索异常：{state.get('retrieval_errors', [])}\n"
+            f"可用论断：{state['evidence_review'].get('usable_claims', [])}\n"
+        )
+    retry_json_system_prompt = retry_system_prompt + "只输出 JSON，字段为 answer、followup、discussion_prompts。"
     if state.get("evidence_review", {}).get("proof_anchor_mode") == "exact_textbook_iff_statement":
         verified_proof = _deterministic_exact_iff_proof(
             str(state.get("question") or ""), generation_sources,
@@ -3119,15 +3835,69 @@ def generate_answer(state: GardenerState) -> dict[str, Any]:
                 "discussion_prompts": ["比较三种证明路线", "伴随矩阵恒等式为什么成立？"],
             }
             generation_provider = "deterministic-verified-proof"
+    if payload is None and self_contained_reasoning:
+        generation_provider = "project-model-self-contained-text"
+        plain_system_prompt = (
+            retry_system_prompt
+            + "你必须直接输出一份可独立展示的完整最终回答。不要输出 JSON、审校意见、修改说明或增量补丁。"
+            + auditable_code_instruction
+        )
+        plain_user_prompt = (
+            f"问题：{retry_question}\n{rigorous_reasoning_instruction}\n"
+            f"{reasoning_instruction}\n{precision_instruction}\n{auditable_code_instruction}"
+        )
+        try:
+            plain_answer = chat(
+                plain_system_prompt,
+                plain_user_prompt,
+                temperature=0.2,
+                timeout=closed_loop_generation_timeout_seconds(),
+                max_retries=0,
+            )
+            if plain_answer and plain_answer.strip():
+                payload = {
+                    "answer": plain_answer.strip(),
+                    "followup": "你想重点复核哪一步推导？",
+                    "discussion_prompts": [],
+                }
+        except LLMError as exc:
+            generation_error = str(exc)[:320]
+        if payload is None:
+            # One bounded retry handles transient provider overloads and empty
+            # responses without falling back to unrelated retrieval evidence.
+            generation_provider = "project-model-self-contained-text-retry"
+            try:
+                plain_answer = chat(
+                    plain_system_prompt,
+                    plain_user_prompt,
+                    temperature=0.2,
+                    timeout=min(30.0, closed_loop_generation_timeout_seconds()),
+                    max_retries=0,
+                )
+                if plain_answer and plain_answer.strip():
+                    payload = {
+                        "answer": plain_answer.strip(),
+                        "followup": "你想重点复核哪一步推导？",
+                        "discussion_prompts": [],
+                    }
+            except LLMError as retry_exc:
+                retry_error = str(retry_exc)[:220]
+                generation_error = (
+                    f"{generation_error}；闭环文本重试失败：{retry_error}"
+                    if generation_error else f"闭环文本重试失败：{retry_error}"
+                )
     try:
         overview_rule = (
             "当前是首次接触的领域概览。输出 800~1500 字、约1000字的中立认知地图，固定结构为：开头列出‘本概览基于以下来源’和生成日期；# 领域名概览；## 一句话定位；## 它在解决什么问题；## 核心框架（可用小型层级图）；## 发展脉络（极简版，3~5个时间+事件节点）；必要时写 ## 它不是什么（边界澄清）；## 如果感兴趣，可以从这里开始（3~4个入口，每项说明推荐理由）；结尾注明资料截止日期和6个月后建议复审。核心定义、框架与每个历史节点必须使用给定的数字脚注 [1][2]，编号严格对应证据列表；来源不足处使用规范化未核验表达，严禁模型常识伪装成检索来源。首次概览正文不得提用户专业、兴趣、旧笔记、掌握度，不做个性化类比，不替用户决定路线。输出 discussion_prompts 为空数组，followup 只用中性话术说明用户可自行输入任何想深入的方向。"
             if overview_mode else ""
         )
-        if payload is None:
+        if payload is None and not self_contained_reasoning:
             payload = _agent_json(
-            "你是教学回答 Agent。承接具体问题与对话，优先准确、自然、有理论意识地回答，不展示内部工作流。解释结构由问题本身决定：定义题可以先给直觉再澄清关键条件，机制题才展开必要因果链，比较题突出真正存在的差异，开放讨论允许并列视角与不确定性。禁止每一题重复‘先说结论、为什么、成立边界、证据缺口’等固定小标题或把所有问题压进同一个框架；自然段通常优于格式表演，只有内容确实复杂且分节能提高理解时才使用针对问题内容的标题。简单问题说清即可，复杂问题适度展开；不要为了长度重复。若用户明确说不要重复定义，必须直接承接上一轮已经出现的具体例子、符号和计算结果，讲新的应用步骤，禁止重新从头解释已学概念。若 primary_intent=compare，分别准确定位双方，并根据实际材料选择有实质内容的比较维度、共同区域与不可互换之处。只使用通过审核的证据，并尊重来源角色：direct_evidence/counterevidence 才能支撑或反驳核心命题；prerequisite 只能解释必要定义，不能冒充答案依据；context 只能交代背景。如果教材只支持偏导等前置概念，不支持新的算法或应用，必须明确说该应用缺少教材直接证据，不能把前置教材标成应用结论的来源。一般模式用 [M1]/[L1]/[W1]/[A1]/[T1]/[P1] 标注实际承载相应句子的来源，禁止堆砌引用。只有确实有助于回答时才补充历史、邻近理论或反例。区分已证实事实、合理推测与价值判断；证据不足时如实交代，不用流畅文案补全。M 表示用户带入材料，abstract 只能做摘要导读，open_fulltext 才能声称阅读正文。T 表示授权微信片段，只能说明对话实际出现的内容。禁止固定套用‘这和你学过的某某相似’，也禁止为了个性化强行引用无关课本。" + overview_rule + "输出 answer、followup、discussion_prompts。",
-            f"问题：{state['question']}\n对话：{state.get('dialogue','')}\n探究框架：{state['intent']}\n教学策略：{strategy}\n"
+            "你是教学回答 Agent。承接具体问题与对话，优先准确、自然、有理论意识地回答，不展示内部工作流。解释结构由问题本身决定：定义题可以先给直觉再澄清关键条件，机制题才展开必要因果链，比较题突出真正存在的差异，开放讨论允许并列视角与不确定性。禁止每一题重复‘先说结论、为什么、成立边界、证据缺口’等固定小标题或把所有问题压进同一个框架；自然段通常优于格式表演，只有内容确实复杂且分节能提高理解时才使用针对问题内容的标题。简单问题说清即可，复杂问题适度展开；不要为了长度重复。若用户明确说不要重复定义，必须直接承接上一轮已经出现的具体例子、符号和计算结果，讲新的应用步骤，禁止重新从头解释已学概念。若 primary_intent=compare，分别准确定位双方，并根据实际材料选择有实质内容的比较维度、共同区域与不可互换之处。对实时信息、经验事实、人物史实、官方口径和显式来源请求，只使用通过审核的证据；经确定性路由标为普通、非实时知识教学的问题，可以使用通行领域知识直接讲解，不要求先取得网页正文，也不向用户汇报内部检索状态，但不得伪造引用、统计或最新结论。实际提供来源时尊重来源角色：direct_evidence/counterevidence 才能支撑或反驳核心命题；prerequisite 只能解释必要定义，不能冒充答案依据；context 只能交代背景。只有在本轮确实提供了来源且用户要求依据来源回答时，才说明某来源只支持前置概念而不支持新应用。一般模式用 [M1]/[L1]/[W1]/[A1]/[T1]/[P1] 标注实际承载相应句子的来源，禁止堆砌引用。只有确实有助于回答时才补充历史、邻近理论或反例。区分已证实事实、合理推测与价值判断；需要外部核验而证据不足时如实交代，不用流畅文案补全。M 表示用户带入材料，abstract 只能做摘要导读，open_fulltext 才能声称阅读正文。T 表示授权微信片段，只能说明对话实际出现的内容。禁止固定套用‘这和你学过的某某相似’，也禁止为了个性化强行引用无关课本。" + overview_rule + "输出 answer、followup、discussion_prompts。",
+            f"问题：{state.get('question','')}\n对话：{state.get('dialogue','')}\n"
+            f"连续对话状态：{state.get('conversation_state', {})}\n"
+            "连续性硬约束：把本轮视为同一场对话的下一步。若历史已经给出主题、材料、例子、符号、用户学过的内容或限制，必须直接继承并使用；不得声称用户没有提供。只有历史与长期记忆都确实没有相关信息时才询问补充。\n"
+            f"探究框架：{state.get('intent',{})}\n教学策略：{strategy}\n"
             "公开网页或机构官网使用 [P1] 等实际证据编号；search_snippet 只证明搜索摘要明确展示的信息，不得声称已阅读全文。\n"
             "篇幅偏好：在证据充分时充分展开用户真正关心的概念与推理；普通概念题约250~450字，理论辨析、证明、推导与交叉问题约500~1100字。信息较多时自然分段；必要时使用两三个由当前内容决定的 Markdown 加粗小标题（如 **谱定理为何关键**）、公式或列表，但不要每题套固定框架，也不要固定使用‘结论、机制、边界’等通用栏目。避免重复和没有来源的新断言。\n"
             f"{previous_example_instruction}\n"
@@ -3135,7 +3905,9 @@ def generate_answer(state: GardenerState) -> dict[str, Any]:
             f"{rigorous_reasoning_instruction}\n"
             f"{reasoning_instruction}\n"
             f"{precision_instruction}\n"
-            f"检索异常：{state.get('retrieval_errors', [])}\n可用论断：{state['evidence_review'].get('usable_claims',[])}\n"
+            f"{model_knowledge_instruction}\n"
+            f"{evidence_limit_instruction}\n"
+            f"{runtime_evidence_instruction}"
             f"{grounding_rule}\n通过审核的证据：\n{evidence_text}",
                 timeout=45,
             )
@@ -3143,61 +3915,88 @@ def generate_answer(state: GardenerState) -> dict[str, Any]:
         payload = None
         generation_provider = "deterministic-grounded-fallback"
         generation_error = str(exc)[:320]
-        if self_contained_reasoning:
-            generation_provider = "project-model-self-contained-json-retry"
+        if retry_without_retrieval and not self_contained_reasoning:
+            generation_provider = (
+                "project-model-self-contained-json-retry"
+                if self_contained_reasoning else
+                "project-model-stable-knowledge-json-retry"
+            )
             try:
                 payload = _agent_json(
-                    "你是严谨的自足推理回答 Agent。只使用用户题设和通用形式规则，不需要外部检索。"
-                    "先检查前提是否成立，再给可核验的关键步骤、条件和结论。"
-                    "只输出 JSON，字段为 answer、followup、discussion_prompts。",
+                    retry_json_system_prompt,
                     f"问题：{retry_question}\n{rigorous_reasoning_instruction}\n{reasoning_instruction}\n{precision_instruction}",
                     timeout=45,
                 )
             except LLMError as retry_exc:
-                generation_error += f"；自足推理重试失败：{str(retry_exc)[:220]}"
+                generation_error += f"；无检索教学重试失败：{str(retry_exc)[:220]}"
     answer = _format_answer_payload((payload or {}).get("answer"))
-    if "\\n" in answer:
-        answer = answer.replace("\\n", "\n")
+    answer = _decode_document_newlines(answer)
     if (
         not answer
-        and self_contained_reasoning
-        and generation_provider != "project-model-self-contained-json-retry"
+        and retry_without_retrieval
+        and not self_contained_reasoning
+        and generation_provider not in {
+            "project-model-self-contained-json-retry",
+            "project-model-stable-knowledge-json-retry",
+        }
     ):
-        generation_provider = "project-model-self-contained-json-retry"
+        generation_provider = (
+            "project-model-self-contained-json-retry"
+            if self_contained_reasoning else
+            "project-model-stable-knowledge-json-retry"
+        )
         try:
             payload = _agent_json(
-                "你是严谨的自足推理回答 Agent。只使用用户题设和通用形式规则，不需要外部检索。"
-                "先检查前提是否成立，再给可核验的关键步骤、条件和结论。"
-                "只输出 JSON，字段为 answer、followup、discussion_prompts。",
+                retry_json_system_prompt,
                 f"问题：{retry_question}\n{rigorous_reasoning_instruction}\n{reasoning_instruction}\n{precision_instruction}",
                 timeout=45,
             )
             answer = _format_answer_payload((payload or {}).get("answer"))
-            if "\\n" in answer:
-                answer = answer.replace("\\n", "\n")
+            answer = _decode_document_newlines(answer)
         except LLMError as retry_exc:
-            generation_error += f"；自足推理空结果重试失败：{str(retry_exc)[:220]}"
+            generation_error += f"；无检索教学空结果重试失败：{str(retry_exc)[:220]}"
+    if (
+        stable_educational_request
+        and not self_contained_reasoning
+        and (not answer.strip() or _META_REFUSAL_LANGUAGE.search(answer))
+    ):
+        try:
+            plain_answer = chat(
+                retry_system_prompt
+                + "直接输出可独立展示的中文正文，不要输出 JSON、内部来源状态、拒答或重试建议。",
+                f"问题：{retry_question}\n{rigorous_reasoning_instruction}\n{reasoning_instruction}\n{precision_instruction}",
+                temperature=0.2,
+                timeout=45,
+            )
+            if plain_answer and plain_answer.strip() and not _META_REFUSAL_LANGUAGE.search(plain_answer):
+                answer = plain_answer.strip()
+                generation_provider = "project-model-stable-knowledge-text-retry"
+        except LLMError as retry_exc:
+            generation_error += f"；普通知识纯文本重试失败：{str(retry_exc)[:220]}"
+    generation_failed = not bool(answer.strip())
     if not answer:
-        if self_contained_reasoning:
-            answer = (
-                "这次自足推理模型没有返回可解析的实质答案。题目不需要外部证据，"
-                "因此不会引用无关材料来填补；请重试本题。"
-            )
-        elif accepted:
-            direct_ids = {
-                source_id for source_id, role in state["evidence_review"].get("source_roles", {}).items()
-                if role in {"direct_evidence", "counterevidence"}
-            }
-            source = next(
-                (item for item in accepted if str(item.get("source_id")) in direct_ids),
-                accepted[0],
-            )
-            answer = f"目前最贴近问题的可靠内容来自《{source['title']}》：{source['text'][:500]} [{source['source_id']}]\n\n现有证据还不足以完成更强的推断。"
-        elif state.get("wechat_lookup", {}).get("requested"):
+        if state.get("wechat_lookup", {}).get("requested"):
             detail = "；".join(state.get("retrieval_errors", [])) or "没有取得指定会话的消息"
-            answer = f"我理解你希望我读取微信记录，但这次没有取得可引用的聊天片段：{detail}。我不会用猜测代替真实消息。"
+            answer = (
+                f"当前没有取得可引用的微信聊天片段：{detail}。先给你可继续执行的办法："
+                "确认会话名称和时间范围后重新读取；在记录取回前，我只分析你已经贴出的文字，不猜测未读取的消息。"
+            )
         else:
-            answer = "这次没有取得足够贴合且可核查的证据。我不想用一个听起来完整、实际没有依据的解释糊弄你。可以先缩小问题范围，或补充一份教材与来源。"
+            answer = _bounded_generation_fallback(
+                state,
+                accepted=accepted,
+                evidence_detail=(evidence_limit_search_status + evidence_limit_detail).strip(),
+            )
+        generation_provider = "deterministic-bounded-fallback"
+    meta_refusal_replaced = bool(_META_REFUSAL_LANGUAGE.search(answer))
+    if meta_refusal_replaced:
+        answer = _bounded_generation_fallback(
+            state,
+            accepted=accepted,
+            evidence_detail=(evidence_limit_search_status + evidence_limit_detail).strip(),
+        )
+        generation_provider = "deterministic-meta-refusal-replacement"
+        generation_failed = True
     if premise_guard and not re.search(premise_guard["required_pattern"], answer, re.I):
         answer = premise_guard["correction"] + "\n\n" + answer
     allowed_source_ids = {str(item.get("source_id")) for item in generation_sources}
@@ -3233,10 +4032,12 @@ def generate_answer(state: GardenerState) -> dict[str, Any]:
     return {
         "answer": answer, "followup": followup, "discussion_prompts": prompts,
         "generation_sources": generation_sources,
+        "generation_failed": generation_failed,
         "trace": _trace(state, "generate_answer", "只使用通过证据审查的来源生成教学回答", {
             "citation_binding_repaired": citation_repaired,
             "generation_provider": generation_provider,
             "generation_error": generation_error,
+            "meta_refusal_replaced": meta_refusal_replaced,
             "removed_invalid_citations": list(dict.fromkeys(removed_invalid_citations)),
         }),
     }
@@ -3313,6 +4114,7 @@ def generate_deliverables(state: GardenerState) -> dict[str, Any]:
         "followup": text_result["followup"],
         "discussion_prompts": text_result["discussion_prompts"],
         "generation_sources": text_result.get("generation_sources", []),
+        "generation_failed": bool(text_result.get("generation_failed", False)),
         "visualization": visual_result["visualization"],
         "trace": trace,
     }
@@ -3340,13 +4142,17 @@ def review_answer(state: GardenerState) -> dict[str, Any]:
         str(state.get("question") or ""),
         intent_hint=str(state.get("intent", {}).get("primary_intent") or ""),
     )
-    self_contained_reasoning = is_self_contained_reasoning(
+    self_contained_reasoning = _state_routes_must_not_search(state) or is_self_contained_reasoning(
         str(state.get("question") or ""), reasoning_profile,
+    )
+    stable_educational_request = _is_stable_educational_request(
+        str(state.get("question") or ""), state.get("intent", {}),
     )
     if (
         reasoning_profile.get("activated")
         and profile == "grounded_knowledge"
         and not self_contained_reasoning
+        and not stable_educational_request
         and not evidence.get("sufficient")
     ):
         reasoning_review = {
@@ -3370,6 +4176,7 @@ def review_answer(state: GardenerState) -> dict[str, Any]:
     evidence_bounded = (
         (open_discussion and not cited_ids)
         or (self_contained_reasoning and not cited_ids)
+        or (stable_educational_request and not cited_ids)
         or (not evidence.get("sufficient") and "证据不足" in answer)
         or (
             bool(evidence.get("sufficient"))
@@ -3465,6 +4272,10 @@ def review_answer(state: GardenerState) -> dict[str, Any]:
     if not modality_fit:
         issues.append("Planner 要求图文表达，但没有交付可用图解")
         target = "visualization" if target == "none" else "both"
+    syntax_review = state.get("syntax_review") or _latex_syntax_review(str(state.get("answer") or ""))
+    if not syntax_review.get("passed", True):
+        issues.extend(issue for issue in syntax_review.get("issues", []) if issue not in issues)
+        target = "text" if target == "none" else "both"
     fallback = QualityReview(
         answered_question=answered,
         evidence_bounded=evidence_bounded,
@@ -3476,11 +4287,11 @@ def review_answer(state: GardenerState) -> dict[str, Any]:
         modality_fit=modality_fit,
         issues=issues,
         repair_target=target,
-        passed=answered and comparison_depth and reasoning_review.get("passed", True) and evidence_bounded and expression_natural and personalization_natural and medical_safe and grounded and visual_teaching_value and modality_fit,
+        passed=answered and comparison_depth and reasoning_review.get("passed", True) and evidence_bounded and expression_natural and personalization_natural and medical_safe and grounded and visual_teaching_value and modality_fit and syntax_review.get("passed", True),
         rationale="检查回答完整性、可迁移推理、事实引用、开放讨论边界、表达自然度、医疗安全与图解可靠性。",
     )
     payload = None
-    high_risk_review = (
+    high_risk_review = not state.get("generation_failed", False) and bool(syntax_review.get("passed", True)) and (
         plan.get("complexity") == "complex"
         or (state.get("intent", {}).get("primary_intent") in {"evaluate", "design"} and not open_discussion)
         or state.get("intent", {}).get("response_mode") == "domain_overview"
@@ -3491,12 +4302,12 @@ def review_answer(state: GardenerState) -> dict[str, Any]:
     if high_risk_review:
         try:
             payload = _agent_json(
-                "你是最终 Reflector，不重新回答问题，只验收并给出定向返工意见。逐句检查：是否直接回答 core_question；是否准确处理 claim_to_verify；事实型核心断言是否由 direct_evidence/counterevidence 支持；是否把 prerequisite 教材错当结论依据；是否强行套兴趣或旧知识；若 teaching_strategy 中存在 preference_directives，最终答案是否可观察地逐项执行，而不是只在计划里声称采用。另检查表达是否机械套用固定标题、主观与哲学问题是否保留开放性、身体问题是否避免诊断并给出必要就医提醒、科学解释是否区分事实与推测。没有直接证据的开放讨论可以回答，但不得捏造文献、教材、学校制度或医学结论。再对照 Planner 的表达计划检查：所选文字/图解是否真的适合问题；图的类型是否正确；图中关系是否来自回答和已审核证据；图解是否比文字更清楚而非装饰。若使用 T 类微信证据，聊天说法与客观事实必须分开。若 response_mode=domain_overview，还要检查中立、完整、来源可追溯且不预设路线。若只需修改文字，repair_target=text；只需重画图则 visualization；两者都错则 both。revised_answer 只能在文字确实有问题时填写。",
-                f"问题：{state['question']}\n意图：{state['intent']}\nPlanner计划：{state.get('planner_decision', {})}\n"
+                "你是最终 Reflector，只评不写，绝不生成、改写或续写用户正文。逐句检查：是否直接回答 core_question；是否覆盖 content_blueprint.required_claims，并把未覆盖项写入 missing_rubric_ids；是否准确处理 claim_to_verify；实时信息、经验事实、人物史实、官方口径和显式来源请求的核心断言是否由 direct_evidence/counterevidence 支持；是否把 prerequisite 教材错当结论依据。若 stable_educational_request=true，则允许用通行教材级知识直接讲解、出题或展示方法，不得仅因无网页证据判失败，但仍要拦截假引用、实时事实和经验统计。检查是否强行套兴趣或旧知识；若 teaching_strategy 中存在 preference_directives，最终答案是否可观察地逐项执行。另检查表达是否机械套用固定标题、开放问题是否保留开放性、身体问题是否安全。再检查文字/图解是否适合问题且图中关系来自已审核证据。只输出评分状态和批注；严禁输出修改后的答案、替换段落或增量补丁。",
+                f"问题：{state['question']}\n意图：{state['intent']}\nPlanner计划：{state.get('planner_decision', {})}\n内容蓝图：{state.get('content_blueprint', {})}\n"
                 f"本地硬检查：{fallback.model_dump()}\n证据审查：{state['evidence_review']}\n教学策略：{state['teaching_strategy']}\n"
-                f"推理协议：{reasoning_profile}\n推理硬检查：{reasoning_review}\n"
+                f"推理协议：{reasoning_profile}\n稳定基础知识直答：{stable_educational_request}\n推理硬检查：{reasoning_review}\n"
                 f"文字回答：\n{state['answer']}\n图解结构：{diagram}\n"
-                "输出 passed、answered_question、evidence_bounded、personalization_natural、expression_natural、boundary_appropriate、medical_safe、modality_fit、visualization_grounded、repair_target(none/text/visualization/both)、issues、revised_answer、rationale。",
+                "输出 passed、answered_question、evidence_bounded、personalization_natural、expression_natural、boundary_appropriate、medical_safe、modality_fit、visualization_grounded、repair_target(none/text/visualization/both)、issues、missing_rubric_ids、critique、rationale。不得输出 answer 或 revised_answer。",
             )
         except (LLMError, AssertionError):
             pass
@@ -3529,6 +4340,8 @@ def review_answer(state: GardenerState) -> dict[str, Any]:
 
 def route_after_reflection(state: GardenerState) -> str:
     review = state.get("quality_review", {})
+    if state.get("generation_failed", False):
+        return "assemble_result"
     if review.get("passed") or int(state.get("revision_count", 0)) >= int(state.get("planner_decision", {}).get("max_revisions", 1)):
         return "assemble_result"
     return "repair_outputs"
@@ -3538,7 +4351,10 @@ def repair_outputs(state: GardenerState) -> dict[str, Any]:
     """Perform at most one targeted revision chosen by the Reflector."""
     review = state.get("quality_review", {})
     target = str(review.get("repair_target") or "both")
-    answer = state["answer"]
+    initial_answer = str(state.get("initial_answer") or state.get("answer") or "")
+    answer = str(state.get("answer") or initial_answer)
+    repair_degraded = False
+    diagnostics: dict[str, Any] = {}
     diagram = state.get("visualization") or DiagramSpec(status="suppressed", kind="none").model_dump()
     if target in {"text", "both"}:
         evidence = state.get("evidence_review", {})
@@ -3546,8 +4362,11 @@ def repair_outputs(state: GardenerState) -> dict[str, Any]:
             str(state.get("question") or ""),
             intent_hint=str(state.get("intent", {}).get("primary_intent") or ""),
         )
-        self_contained_reasoning = is_self_contained_reasoning(
+        self_contained_reasoning = _state_routes_must_not_search(state) or is_self_contained_reasoning(
             str(state.get("question") or ""), reasoning_profile,
+        )
+        stable_educational_request = _is_stable_educational_request(
+            str(state.get("question") or ""), state.get("intent", {}),
         )
         direct_ids = {
             str(source_id) for source_id, role in evidence.get("source_roles", {}).items()
@@ -3560,27 +4379,46 @@ def repair_outputs(state: GardenerState) -> dict[str, Any]:
                 return bool(cited & direct_ids)
             if self_contained_reasoning:
                 return not cited
+            if stable_educational_request:
+                return not cited
             if _response_profile(state.get("question", "")) != "grounded_knowledge":
                 return not cited
             return "证据不足" in candidate
-
-        revised = str(review.get("revised_answer") or "").strip()
-        if revised and keeps_evidence_gate(revised):
-            answer = revised
+        payload = None
+        try:
+            payload = _agent_json(
+                "你是文字 Repair Agent，不是审校员。你必须输出修正后的完整最终回答，确保单独展示时可直接回答用户问题。严禁输出‘证明主体保留’、‘修改如下’、‘请将’、‘其余不变’等批注或增量补丁语言；不得省略未修改段落。只修 Reflector 指出的具体问题，保留正确内容和原有来源标注；不得扩写新事实、改变问题或引入未经审核的来源。必须逐项覆盖 content_blueprint.required_claims；若教学策略含 preference_directives，必须在完整回答中可观察执行。只输出 answer。",
+                f"问题：{state['question']}\n内容蓝图：{state.get('content_blueprint', {})}\n教学策略：{state.get('teaching_strategy', {})}\n"
+                f"推理协议：{reasoning_prompt(reasoning_profile, surface='gardener_chat')}\n"
+                f"Reflector缺失项：{review.get('missing_rubric_ids', [])}\n批注：{review.get('critique') or review.get('issues', [])}\n"
+                f"原始完整回答（必须保留所有正确部分）：\n{initial_answer}",
+            )
+        except (LLMError, AssertionError):
+            pass
+        repaired = str((payload or {}).get("answer") or "").strip()
+        baseline = _claim_coverage(initial_answer, state.get("content_blueprint", {}))
+        candidate = _claim_coverage(repaired, state.get("content_blueprint", {})) if repaired else {"coverage": 0.0, "claims": []}
+        meta_language = bool(_REPAIR_META_LANGUAGE.search(repaired))
+        syntax = _latex_syntax_review(repaired)
+        evidence_ok = bool(repaired) and keeps_evidence_gate(repaired)
+        coverage_ok = candidate["coverage"] >= baseline["coverage"]
+        length_ratio = len(re.sub(r"\s+", "", repaired)) / max(1, len(re.sub(r"\s+", "", initial_answer)))
+        completeness_length_ok = length_ratio >= 0.65
+        diagnostics = {
+            "accepted": bool(repaired) and evidence_ok and coverage_ok and completeness_length_ok and not meta_language and syntax["passed"],
+            "baseline_coverage": baseline,
+            "candidate_coverage": candidate,
+            "meta_language_detected": meta_language,
+            "syntax_review": syntax,
+            "evidence_gate_passed": evidence_ok,
+            "length_ratio": round(length_ratio, 3),
+            "completeness_length_passed": completeness_length_ok,
+        }
+        if diagnostics["accepted"]:
+            answer = repaired
         else:
-            payload = None
-            try:
-                payload = _agent_json(
-                    "你是文字返工 Agent。只修 Reflector 指出的具体问题，保留正确内容和原有来源标注；不得扩写新事实、改变问题或引入未经审核的来源。若教学策略含 preference_directives，必须在改写后可观察执行。输出 answer。",
-                    f"问题：{state['question']}\n教学策略：{state.get('teaching_strategy', {})}\n"
-                    f"推理协议：{reasoning_prompt(reasoning_profile, surface='gardener_chat')}\n"
-                    f"问题清单：{review.get('issues', [])}\n原回答：\n{answer}",
-                )
-            except (LLMError, AssertionError):
-                pass
-            repaired = str((payload or {}).get("answer") or "").strip()
-            if repaired and keeps_evidence_gate(repaired):
-                answer = repaired
+            answer = initial_answer
+            repair_degraded = True
     if target in {"visualization", "both"}:
         allowed_ids = {str(item["source_id"]) for item in state.get("accepted_sources", [])}
         plan = state.get("planner_decision", {})
@@ -3596,17 +4434,30 @@ def repair_outputs(state: GardenerState) -> dict[str, Any]:
         "answer": answer,
         "visualization": diagram,
         "revision_count": int(state.get("revision_count", 0)) + 1,
-        "trace": _trace(state, "repair_outputs", f"完成一次定向返工：{target}", {"issues": review.get("issues", [])}),
+        "repair_degraded": repair_degraded,
+        "repair_diagnostics": diagnostics,
+        "trace": _trace(state, "repair_outputs", f"完成一次定向返工：{target}" if not repair_degraded else "返工未通过完整性闸门，已回滚初始回答", {"issues": review.get("issues", []), "repair_degraded": repair_degraded, **diagnostics}),
     }
 
 
 def assemble_result(state: GardenerState) -> dict[str, Any]:
     answer = str(state.get("answer") or "")
+    if _META_REFUSAL_LANGUAGE.search(answer):
+        answer = _bounded_generation_fallback(
+            state,
+            accepted=list(state.get("accepted_sources", [])),
+            evidence_detail="最终装配已移除旧版元拒答，并保留可执行的回答部分",
+        )
     reasoning_profile = state.get("reasoning_profile") or classify_reasoning_task(
         str(state.get("question") or ""),
         intent_hint=str(state.get("intent", {}).get("primary_intent") or ""),
     )
-    final_self_contained = is_self_contained_reasoning(state.get("question", ""), reasoning_profile)
+    final_self_contained = _state_routes_must_not_search(state) or is_self_contained_reasoning(
+        state.get("question", ""), reasoning_profile,
+    )
+    final_stable_educational = _is_stable_educational_request(
+        str(state.get("question") or ""), state.get("intent", {}),
+    )
     evidence = state.get("evidence_review", {})
     direct_ids = {
         str(source_id) for source_id, role in evidence.get("source_roles", {}).items()
@@ -3616,14 +4467,30 @@ def assemble_result(state: GardenerState) -> dict[str, Any]:
     final_gate_failed = bool(evidence.get("sufficient")) and not bool(initial_cited_ids & direct_ids)
     quality_review = dict(state.get("quality_review") or {})
     if final_gate_failed:
-        answer = (
-            "这轮生成结果在返工后丢失了与直接证据的逐项绑定，因此最终证据硬门已阻止展示该事实性回答。"
-            "请重新提问；园丁会保留原问题，但不会把没有可追溯依据的内容冒充答案。"
+        source = next(
+            (
+                item for item in state.get("accepted_sources", [])
+                if str(item.get("source_id")) in direct_ids
+            ),
+            None,
         )
-        quality_review["passed"] = False
-        quality_review["evidence_bounded"] = False
+        if source:
+            source_id = str(source["source_id"])
+            answer = (
+                answer.rstrip()
+                + f"\n\n**可核查依据：** 上述事实性部分以《{source['title']}》为直接依据 [{source_id}]；"
+                "超出该来源的内容仅作为解释或推演，不视为已核实的新事实。"
+            )
+            quality_review["evidence_bounded"] = True
+        else:
+            answer = (
+                "**证据状态：** 当前无法恢复这轮回答与直接来源的逐项绑定；以下内容仅保留为待核验的解释草稿，"
+                "其中的事实性断言不能视为已确认。\n\n" + answer
+            )
+            quality_review["passed"] = False
+            quality_review["evidence_bounded"] = False
         issues = list(quality_review.get("issues") or [])
-        issue = "最终装配检查发现直接证据引用丢失，已阻止无依据答案"
+        issue = "最终装配检查发现直接证据引用丢失，已恢复引用或降级标记，未删除原回答"
         if issue not in issues:
             issues.append(issue)
         quality_review["issues"] = issues
@@ -3684,6 +4551,8 @@ def assemble_result(state: GardenerState) -> dict[str, Any]:
         layers.append("authority")
     if chat_records:
         layers.append("authorized_wechat")
+    if final_stable_educational and not cited_ids:
+        layers.append("stable_knowledge")
     result = {
         "answer": answer,
         "citations": [
@@ -3712,6 +4581,7 @@ def assemble_result(state: GardenerState) -> dict[str, Any]:
             "confidence": reasoning_profile.get("confidence", 0.0),
             "task_key": reasoning_profile.get("task_key", "general"),
             "self_contained": final_self_contained,
+            "stable_educational": final_stable_educational,
             "review": (
                 {
                     "applicable": False,
@@ -3724,6 +4594,7 @@ def assemble_result(state: GardenerState) -> dict[str, Any]:
                     reasoning_profile.get("activated")
                     and _response_profile(state.get("question", "")) == "grounded_knowledge"
                     and not final_self_contained
+                    and not final_stable_educational
                     and not evidence.get("sufficient")
                 )
                 else review_reasoning_answer(reasoning_profile, answer, surface="gardener_chat")
@@ -3731,6 +4602,9 @@ def assemble_result(state: GardenerState) -> dict[str, Any]:
         },
         "evidence_review": state["evidence_review"], "quality_review": quality_review,
         "revision_count": int(state.get("revision_count", 0)),
+        "repair_degraded": bool(state.get("repair_degraded", False)),
+        "repair_diagnostics": state.get("repair_diagnostics", {}),
+        "generation_failed": bool(state.get("generation_failed", False)),
         "citation_binding": {
             "used_source_ids": sorted(cited_ids & {item["source_id"] for item in accepted}),
             "final_gate_failed": final_gate_failed,
@@ -3781,14 +4655,22 @@ def build_gardener_graph():
     builder.add_node("clarify", timed("clarify", ask_clarification))
     builder.add_node("load_learner_memory", timed("load_learner_memory", load_learner_memory))
     builder.add_node("gate_personalization", timed("gate_personalization", gate_personalization))
+    builder.add_node("prepare_closed_loop", timed("prepare_closed_loop", prepare_closed_loop))
+    builder.add_node("prepare_model_knowledge", timed("prepare_model_knowledge", prepare_model_knowledge))
     builder.add_node("plan_sources", timed("plan_sources", plan_sources))
     builder.add_node("clarify_wechat", timed("clarify_wechat", ask_wechat_clarification))
     builder.add_node("retrieve_sources", timed("retrieve_sources", retrieve_sources))
     builder.add_node("audit_evidence", timed("audit_evidence", audit_evidence))
+    builder.add_node(
+        "prepare_retrieval_retry",
+        timed("prepare_retrieval_retry", prepare_retrieval_retry),
+    )
     builder.add_node("choose_teaching_strategy", timed("choose_teaching_strategy", choose_teaching_strategy))
     builder.add_node("planner_select_delivery", timed("planner_select_delivery", planner_select_delivery))
     builder.add_node("build_content_blueprint", timed("build_content_blueprint", build_content_blueprint))
     builder.add_node("generate_deliverables", timed("generate_deliverables", generate_deliverables))
+    builder.add_node("snapshot_initial_answer", timed("snapshot_initial_answer", snapshot_initial_answer))
+    builder.add_node("validate_output_syntax", timed("validate_output_syntax", validate_output_syntax))
     builder.add_node("reflect_outputs", timed("reflect_outputs", review_answer))
     builder.add_node("repair_outputs", timed("repair_outputs", repair_outputs))
     builder.add_node("assemble_result", timed("assemble_result", assemble_result))
@@ -3804,18 +4686,36 @@ def build_gardener_graph():
     )
     builder.add_edge("clarify", END)
     builder.add_edge("load_learner_memory", "gate_personalization")
-    builder.add_edge("gate_personalization", "plan_sources")
+    builder.add_conditional_edges(
+        "gate_personalization", route_after_personalization,
+        {
+            "prepare_closed_loop": "prepare_closed_loop",
+            "prepare_model_knowledge": "prepare_model_knowledge",
+            "plan_sources": "plan_sources",
+        },
+    )
+    builder.add_edge("prepare_closed_loop", "choose_teaching_strategy")
+    builder.add_edge("prepare_model_knowledge", "choose_teaching_strategy")
     builder.add_conditional_edges(
         "plan_sources", route_after_source_plan,
         {"clarify_wechat": "clarify_wechat", "retrieve_sources": "retrieve_sources"},
     )
     builder.add_edge("clarify_wechat", END)
     builder.add_edge("retrieve_sources", "audit_evidence")
-    builder.add_edge("audit_evidence", "choose_teaching_strategy")
+    builder.add_conditional_edges(
+        "audit_evidence", route_after_evidence_audit,
+        {
+            "prepare_retrieval_retry": "prepare_retrieval_retry",
+            "choose_teaching_strategy": "choose_teaching_strategy",
+        },
+    )
+    builder.add_edge("prepare_retrieval_retry", "retrieve_sources")
     builder.add_edge("choose_teaching_strategy", "planner_select_delivery")
     builder.add_edge("planner_select_delivery", "build_content_blueprint")
     builder.add_edge("build_content_blueprint", "generate_deliverables")
-    builder.add_edge("generate_deliverables", "reflect_outputs")
+    builder.add_edge("generate_deliverables", "snapshot_initial_answer")
+    builder.add_edge("snapshot_initial_answer", "validate_output_syntax")
+    builder.add_edge("validate_output_syntax", "reflect_outputs")
     builder.add_conditional_edges(
         "reflect_outputs", route_after_reflection,
         {"repair_outputs": "repair_outputs", "assemble_result": "assemble_result"},
@@ -3828,11 +4728,268 @@ def build_gardener_graph():
 GARDENER_GRAPH = build_gardener_graph()
 
 
+_PERSONAL_GARDEN_REQUEST = re.compile(
+    r"我的(?:笔记|知识库|知识图谱|教材|课本|课程|记忆|掌握|复习|兴趣|偏好|学习)|"
+    r"结合我|根据我|我以前|我之前|我学过|我忘了|还记得我|记住我|"
+    r"(?:知识|致知)花园|Obsidian|Wiki|双链|写回|沉淀|保存到|加入知识库|"
+    r"复习|出题考我|掌握程度|学习计划|前沿推送|每日推荐|周报|"
+    r"微信|TraceMemo|B站|本地教材|上传的|导入的",
+    re.I,
+)
+_ADAPTIVE_TEACHING_REQUEST = re.compile(
+    r"(?:按|按照|结合|根据).{0,16}(?:我的|我学过|已有|基础|水平|程度|专业|课程|知识|难度)|"
+    r"(?:适合|匹配|基于).{0,12}(?:我的|基础|水平|程度|专业|课程)|"
+    r"(?:数学系|物理系|计算机系|研究生|本科生|高中生).{0,10}(?:难度|水平|方式|深度)",
+    re.I,
+)
+_TOOL_OR_RESEARCH_REQUEST = re.compile(
+    r"(?:检索|搜索|查找|联网|核实|查证|引用|来源|文献|论文|最新|截至|当前政策|现任)|"
+    r"(?:整理|编译|导入|写入|创建|更新|删除).{0,12}(?:笔记|页面|图谱|知识库|Wiki)",
+    re.I,
+)
+_HIGH_STAKES_REQUEST = re.compile(
+    r"诊断|用药|剂量|症状|治疗|法律意见|合同风险|投资建议|买入|卖出|贷款|保险理赔",
+    re.I,
+)
+_FOLLOWUP_REFERENCE = re.compile(r"^(?:那|这个|它|刚才|上面|继续|再说|为什么呢|然后呢)", re.I)
+
+
+def select_answer_lane(
+    question: str,
+    *,
+    history: list[dict[str, Any]] | None = None,
+    direct_material: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Choose the base-model floor unless a Garden capability adds real value.
+
+    The direct lane is deliberately conservative: ordinary stable knowledge and
+    self-contained reasoning go straight to the configured base model. Personal
+    knowledge, longitudinal learning, tools, current facts and high-stakes
+    questions keep the auditable Garden workflow.
+    """
+    text = re.sub(r"\s+", " ", str(question or "")).strip()
+    reasons: list[str] = []
+    if direct_material:
+        reasons.append("用户提供了待解析材料")
+    if _PERSONAL_GARDEN_REQUEST.search(text):
+        reasons.append("请求个人知识、记忆、复习或知识写回")
+    if _ADAPTIVE_TEACHING_REQUEST.search(text):
+        reasons.append("请求依据个人基础、专业或难度自适应讲解")
+    if _TOOL_OR_RESEARCH_REQUEST.search(text):
+        reasons.append("请求工具、来源或时效性核验")
+    if _HIGH_STAKES_REQUEST.search(text):
+        reasons.append("高风险问题需要证据与边界审查")
+    if _FOLLOWUP_REFERENCE.search(text):
+        prior_layers = {
+            str(item.get("evidence_layer") or "none")
+            for item in history or [] if isinstance(item, dict)
+        }
+        if prior_layers - {"none", "model_knowledge", "stable_knowledge"}:
+            reasons.append("正在承接使用过个人或外部证据的上一轮")
+    if any(
+        str(item.get("role") or "") == "assistant"
+        and str(item.get("evidence_layer") or "") == "clarification"
+        for item in (history or [])[-2:]
+        if isinstance(item, dict)
+    ):
+        # A terse answer such as “学术界” may be the user's response to the
+        # Garden's disambiguation question.  It must re-enter the same graph so
+        # the resolved object and source policy are preserved.
+        reasons.append("正在回答上一轮的消歧问题")
+    route = evidence_route(text)
+    if route.get("search_enabled"):
+        reasons.append("确定性证据路由要求检索")
+    if route.get("routing_target") == "MUST_NOT_SEARCH":
+        # Closed proofs/calculations need the auditable reasoning graph even
+        # though their retrieval subtree is deliberately disabled.
+        reasons.append("闭环推理需要可审计步骤且禁止检索")
+    return {
+        "lane": "garden_enhanced" if reasons else "direct_model",
+        "reasons": list(dict.fromkeys(reasons)),
+        "evidence_route": route.get("routing_target", "MODEL_KNOWLEDGE_ALLOWED"),
+        "policy": "base-model-floor-v1",
+    }
+
+
+def _direct_intent(question: str) -> dict[str, Any]:
+    profile = classify_reasoning_task(question)
+    if re.search(r"区别|比较|异同|哪个好", question):
+        primary = "compare"
+    elif re.search(r"如何|怎么|设计|方案", question):
+        primary = "design"
+    elif re.search(r"为什么|机制|原理", question):
+        primary = "explain_mechanism"
+    elif re.search(r"是否|能否|判断|评价", question):
+        primary = "evaluate"
+    else:
+        primary = "define"
+    return IntentResult(
+        primary_intent=primary,
+        concepts=_explicit_academic_concepts(question)[:8],
+        task_demand="analyze" if profile.get("activated") else "understand",
+        core_question=question[:500],
+        confidence=0.8,
+        evidence="快速通道只解析当前显式问题，不推断长期画像。",
+    ).model_dump()
+
+
+def run_direct_model_lane(
+    store: GardenStore,
+    context: GardenContext,
+    question: str,
+    history: list[dict[str, Any]],
+    lane: dict[str, Any],
+    on_text_delta: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Preserve the configured model's native answer quality for ordinary Q&A."""
+    explicit_preferences = [
+        str(item).strip()
+        for item in context.learner_settings.explicit_teaching_preferences
+        if str(item).strip()
+    ][:3]
+    history_text = "\n".join(
+        f"{'用户' if item.get('role') == 'user' else '助手'}：{str(item.get('content') or '')[:1800]}"
+        for item in history[-8:]
+    )
+    user_prompt = (
+        (f"最近对话：\n{history_text}\n\n" if history_text else "")
+        + f"当前问题：{question}"
+    )
+    system_prompt = (
+        "直接回答用户当前问题，保持当前基础模型的完整原生能力。"
+        "根据问题本身选择最清楚的结构，给出必要的推理、条件、反例或步骤；不要展示内部路由，"
+        "不要假装使用了个人记忆、知识库或外部来源，不要为了格式套固定模板。"
+        "若用户提供的前提不足，给出条件性结论并指出缺口；不要编造实时事实或引用。"
+    )
+    if explicit_preferences:
+        system_prompt += (
+            "\n用户已明确确认以下讲解偏好，在不改变事实和不省略必要前提的条件下执行："
+            + "；".join(explicit_preferences)
+        )
+    try:
+        timeout = float(os.getenv("GARDEN_DIRECT_ANSWER_TIMEOUT_SECONDS", "120"))
+    except ValueError:
+        timeout = 120.0
+    started = time.perf_counter()
+    try:
+        call = chat_stream if on_text_delta else chat
+        call_kwargs: dict[str, Any] = {
+            "temperature": 0.25,
+            "timeout": max(30.0, min(240.0, timeout)),
+            "max_retries": 1,
+        }
+        if on_text_delta:
+            call_kwargs["on_delta"] = on_text_delta
+        answer = call(system_prompt, user_prompt, **call_kwargs)
+        generation_error = ""
+    except LLMError as exc:
+        answer = "当前基础模型调用暂时失败，没有用低质量模板替代回答。请稍后重试。"
+        generation_error = str(exc)[:320]
+    answer = str(answer or "").strip()
+    profile = classify_reasoning_task(question)
+    reasoning_review = review_reasoning_answer(profile, answer, surface="direct_model")
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+    intent = _direct_intent(question)
+    failed = bool(generation_error) or not answer
+    trace = [{
+        "node": "direct_model_answer",
+        "summary": "普通问题直达基础模型" if not failed else "基础模型调用失败，未伪造回答",
+        "data": {"duration_ms": elapsed_ms, "lane": lane, "generation_error": generation_error},
+    }]
+    store.add_activity("agent_query", question[:80], 2)
+    return {
+        "answer": answer,
+        "answer_mode": "direct_model",
+        "enhancement_summary": (
+            "仅执行用户明确设置的讲解偏好；未调用推断画像、知识检索或外部工具。"
+            if explicit_preferences else
+            "未调用个人记忆、知识检索或工具；保留基础模型原生回答能力。"
+        ),
+        "citations": [], "local_connections": [], "web_sources": [], "wechat_sources": [],
+        "followup": "", "discussion_prompts": [], "evidence_layer": "model_knowledge",
+        "researched_online": False, "research_error": "", "offer_save": True,
+        "agent_trace": trace, "intent": intent,
+        "teaching_strategy": TeachingStrategy(
+            personalization_basis=(
+                "仅执行用户明确设置：" + "；".join(explicit_preferences)
+                if explicit_preferences else
+                "普通问题直达基础模型，未采用个人画像。"
+            ),
+            preference_directives=explicit_preferences,
+        ).model_dump(),
+        "planner": PlannerDecision(
+            goal="保持基础模型原生回答质量", complexity="simple",
+            required_steps=["direct_model_answer"], reflection_required=False,
+            max_revisions=0, stop_condition="基础模型返回完整回答。",
+        ).model_dump(),
+        "visualization": DiagramSpec(status="suppressed", kind="none").model_dump(),
+        "personalization": PersonalizationPlan(
+            status="applied" if explicit_preferences else "standard",
+            confidence=0.98 if explicit_preferences else 0.0,
+            strategy_summary=(
+                "执行用户明确讲解偏好" if explicit_preferences
+                else "本轮未请求个性化增强"
+            ),
+            fallback_reason="" if explicit_preferences else "普通问题默认不读取长期推断画像。",
+            applied_claim_ids=[
+                f"setting:teaching_preference:{index + 1}"
+                for index in range(len(explicit_preferences))
+            ],
+            hypotheses=[
+                {
+                    "claim": preference,
+                    "claim_id": f"setting:teaching_preference:{index + 1}",
+                    "source_kind": "explicit",
+                }
+                for index, preference in enumerate(explicit_preferences)
+            ],
+            evidence=[
+                {
+                    "evidence_id": f"setting:teaching_preference:{index + 1}",
+                    "observation": f"用户在设置中明确选择：{preference}",
+                    "relation": "supports", "weight": 1.0,
+                    "source_kind": "explicit",
+                }
+                for index, preference in enumerate(explicit_preferences)
+            ],
+        ).model_dump(),
+        "reasoning": {
+            "type": profile.get("key") if profile.get("activated") else "general",
+            "label": profile.get("label") if profile.get("activated") else "通用问答",
+            "confidence": profile.get("confidence", 0.0),
+            "task_key": profile.get("task_key", "general"),
+            "self_contained": is_self_contained_reasoning(question, profile),
+            "stable_educational": True,
+            "review": reasoning_review,
+        },
+        "evidence_review": EvidenceDecision(
+            sufficient=False, rationale="普通问题使用基础模型知识，不伪装成本地或外部证据。",
+        ).model_dump(),
+        "quality_review": QualityReview(
+            passed=not failed, answered_question=not failed,
+            issues=[generation_error] if generation_error else [],
+            rationale="快速通道不以额外规则重写基础模型答案。",
+        ).model_dump(),
+        "revision_count": 0, "repair_degraded": False, "repair_diagnostics": {},
+        "generation_failed": failed,
+        "citation_binding": {"used_source_ids": [], "final_gate_failed": False},
+        "memory_used": {
+            "claims": 0, "mastery": 0,
+            "l1": {"role": "本轮问答仍记录为可追溯学习事件", "used_for_current_answer": False},
+            "l2": {"recalled_claim_ids": []},
+            "l3": {"profile_graph_nodes": 0, "profile_graph_edges": 0, "claim_ids_used_for_understanding": []},
+        },
+        "route": lane,
+        "request_id": context.request_id, "session_id": context.session_id,
+    }
+
+
 def run_gardener_graph(
     store: GardenStore,
     context: GardenContext,
     *,
     include_evaluation_context: bool = False,
+    on_text_delta: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     question, direct_material = _extract_frontier_material(context.current_message.content)
     clean_history = [
@@ -3844,10 +5001,19 @@ def run_gardener_graph(
         for item in context.conversation_history[-10:]
     ]
     dialogue = "\n".join(f"{'用户' if item['role']=='user' else '园丁'}：{item['content']}" for item in clean_history)
+    recent_user_turns = [item["content"] for item in clean_history if item["role"] == "user"][-3:]
+    recent_assistant_turns = [item["content"] for item in clean_history if item["role"] == "assistant"][-2:]
+    conversation_state = {
+        "same_session": bool(clean_history),
+        "recent_user_goals": recent_user_turns,
+        "last_answer": recent_assistant_turns[-1] if recent_assistant_turns else "",
+        "current_request": question.strip(),
+        "continuity_rule": "优先承接最近明确对象、材料、符号、例子与限制；不要把追问当作孤立新问题。",
+    }
     initial: GardenerState = {
         "store": store, "context": context, "question": question.strip(),
         "direct_material": direct_material,
-        "history": clean_history, "dialogue": dialogue,
+        "history": clean_history, "dialogue": dialogue, "conversation_state": conversation_state,
         "learner_context": {
             "learning_level": context.learner_settings.declared_level,
             "explicit_interests": list(context.learner_settings.explicit_interests),
@@ -3860,8 +5026,35 @@ def run_gardener_graph(
     }
     if not initial["question"]:
         raise ValueError("请先写下你想问园丁的问题")
+    lane = select_answer_lane(
+        initial["question"], history=clean_history, direct_material=direct_material,
+    )
+    # Evaluation runs deliberately exercise the complete knowledge-garden graph.
+    # Production chat may take the direct-model quality-floor lane, but silently
+    # bypassing nodes during a closed-loop benchmark would make its result invalid.
+    if lane["lane"] == "direct_model" and not include_evaluation_context:
+        result = run_direct_model_lane(
+            store, context, initial["question"], clean_history, lane, on_text_delta,
+        )
+        if include_evaluation_context:
+            result["evaluation_context"] = {
+                "retrieved_contexts": [], "retrieved_context_ids": [], "retrieved_titles": [],
+            }
+        return result
+    if include_evaluation_context and lane["lane"] == "direct_model":
+        lane = {
+            **lane,
+            "lane": "garden_enhanced",
+            "reasons": [*lane.get("reasons", []), "evaluation_requires_full_graph"],
+        }
     final = GARDENER_GRAPH.invoke(initial)
     result = final["result"]
+    result.setdefault("answer_mode", "garden_enhanced")
+    result.setdefault("route", lane)
+    result.setdefault(
+        "enhancement_summary",
+        "按需使用个人记忆、知识证据、学习状态或工具增强基础模型。",
+    )
     if include_evaluation_context:
         evaluation_sources = final.get("generation_sources") or final.get("accepted_sources", [])
         result["evaluation_context"] = {

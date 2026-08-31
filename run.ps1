@@ -1,6 +1,8 @@
 param(
     [string]$Python = "python",
     [int]$Port = 8765,
+    [string]$BaseUrl = "",
+    [string]$Model = "",
     [switch]$AskForApiKey,
     [switch]$SaveApiKey,
     [switch]$ForgetSavedApiKey,
@@ -10,6 +12,8 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $projectRoot
+if ($BaseUrl) { $env:GARDEN_BASE_URL = $BaseUrl.TrimEnd('/') }
+if ($Model) { $env:GARDEN_MODEL = $Model }
 $storageRoot = Join-Path $projectRoot "data"
 $env:GARDEN_TEMP_DIR = Join-Path $storageRoot "tmp"
 $env:GARDEN_CACHE_DIR = Join-Path $storageRoot "cache"

@@ -220,6 +220,46 @@ def reasoning_subject(question: str) -> str:
     return text[matches[-1].end():].strip() if matches else text
 
 
+def science_precision_instruction(question: str) -> str:
+    """Return transferable correctness guards for independently verified defects."""
+    text = re.sub(r"\s+", "", reasoning_subject(question))
+    guards: list[str] = []
+    if re.search(r"有限群|群同态|同构定理|商群", text, re.I) and re.search(
+        r"阶数|order|同构", text, re.I,
+    ):
+        guards.append(
+            "【有限群精度】群的阶数通常不能唯一确定同构类型；例如 4 阶有 C4 与 C2×C2，"
+            "9 阶有 C9 与 C3×C3。第一同构定理只断言 G/ker(phi) 同构于 im(phi)，"
+            "不得把它改写成‘同阶群必同构’。代码验证必须显式检查运算表、同态、核、陪集和诱导映射。"
+        )
+    if re.search(r"双曲|hyperbol", text, re.I) and re.search(
+        r"测地线|geodesic|切向|双曲面", text, re.I,
+    ):
+        guards.append(
+            "【双曲几何精度】双曲面模型必须使用 Lorentz/Minkowski 内积完成切空间投影和归一化；"
+            "不得用 np.linalg.norm 的欧氏范数代替。若采用双曲面 <x,x>_L=-1，切向量满足"
+            "<x,v>_L=0，单位切向量用 sqrt(<v,v>_L) 归一化，并检查数值轨迹保持约束。"
+            "球面两点最短弧的打靶搜索必须限制在首个最短分支（单位球通常为 [0, pi]），"
+            "避免在多个等价极小值中返回 5pi/2 等长弧；运行后必须断言端点残差及数值弧长"
+            "分别吻合 arccos 点积与 arcosh(-Lorentz 点积) 的解析距离。"
+        )
+    if re.search(r"Ramanujan|τ\(?n?\)?|tau", text, re.I) and re.search(
+        r"乘性|Fourier|Eisenstein|系数", text, re.I,
+    ):
+        guards.append(
+            "【模形式计算精度】验证 tau(mn) 时必须把 q 展开预先计算到所有所需最大下标"
+            "max(mn)，不能用固定默认截断后越界读取；Delta(q) 必须由明确的 q 级数或乘积展开定义，"
+            "不得在代码中留下未定义的 Delta 表达式。有限数值核验不能冒充一般乘性定理的证明。"
+        )
+    if re.search(r"Christofides|1\.5[-倍近似]*|旅行商|TSP", text, re.I):
+        guards.append(
+            "【Christofides 实现精度】Euler 回路 shortcut 时只向 tour 追加顶点标识，绝不能"
+            "tour.append(tour) 形成自引用列表；输出前断言每个城市恰出现一次、首尾闭合，并分别核对"
+            "MST、奇度顶点完美匹配、Euler 多重图和 shortcut 后的代价。1.5 界只对度量 TSP 成立。"
+        )
+    return "\n".join(guards)
+
+
 def classify_reasoning_task(
     question: str,
     *,
@@ -271,25 +311,83 @@ def classify_reasoning_task(
     }
 
 
+_INHERENTLY_CLOSED_REASONING_KEYS = {
+    "mathematical_proof", "probability_reasoning", "algorithm_design",
+    "code_diagnosis", "logical_reasoning", "argument_analysis",
+    "decision_analysis", "integrated_constraints", "counterfactual",
+    "experimental_design", "physical_modelling", "statistical_analysis",
+    "causal_inference", "concept_distinction", "economic_analysis", "policy_analysis",
+}
+
+
 def is_self_contained_reasoning(question: str, profile: dict[str, Any]) -> bool:
     """Allow deduction from supplied premises without pretending it is sourced fact."""
+    route = evidence_route(question, profile=profile)
+    if route["routing_target"] != "MUST_NOT_SEARCH":
+        return False
     if not profile.get("activated"):
         return False
     text = reasoning_subject(question)
-    if re.search(r"最新|截至(?:今天|目前|\d{4})|现实中到底|请查|检索|搜索|给出(?:论文|文献|来源|出处)", text):
-        return False
-    if re.search(r"根据(?:论文|研究|教材|官方数据)|实际统计|真实数据", text):
-        return False
-    inherently_closed = {
-        "mathematical_proof", "probability_reasoning", "algorithm_design",
-        "code_diagnosis", "logical_reasoning", "argument_analysis",
-        "decision_analysis", "integrated_constraints", "counterfactual",
-        "experimental_design", "physical_modelling", "statistical_analysis",
-        "causal_inference", "concept_distinction", "economic_analysis", "policy_analysis",
-    }
-    if profile.get("key") in inherently_closed:
+    if profile.get("key") in _INHERENTLY_CLOSED_REASONING_KEYS:
         return True
     return bool(re.search(r"[:：]|\n\s*[-\d]|假设|现有|已知|某(?:公司|城市|平台|研究)", text))
+
+
+def evidence_route(
+    question: str, *, profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Production evidence router shared by the graph and evaluation runners.
+
+    This answers only whether external evidence is required.  Subject/reasoning
+    classification remains the responsibility of ``classify_reasoning_task``.
+    """
+    subject = reasoning_subject(question)
+    compact = re.sub(r"\s+", "", subject)
+    # Negated mentions are requirements not to search and must not become hits.
+    scrubbed = re.sub(r"(?:无需|无须|不用|不要|不必|禁止)(?:外部|联网)?(?:检索|搜索|查找)(?:最新)?(?:资料|来源|数据)?", "", compact)
+    current = re.findall(
+        r"截至(?:今天|目前|\d{4})|最新|现任|当前(?:价格|政策|统计|官方值)|latest|asof",
+        scrubbed, re.I,
+    )
+    explicit = re.findall(
+        r"(?:^|[，。；：:、]|请|先|再|然后|并)(?:检索|搜索|查找|联网)"
+        r"|给出(?:论文|文献|来源|出处)|权威(?:论文|数据)|实测(?:数据|数量级)",
+        scrubbed, re.I,
+    )
+    external = re.findall(r"根据(?:论文|研究|教材|官方数据)|实际统计|真实数据", scrubbed, re.I)
+    deduction = re.findall(
+        r"证明|推导|计算|求解|判断|构造|"
+        r"(?<![要请需])求(?=[A-Za-z0-9\[\u4e00-\u9fff])|"
+        r"(?:给出|导出)[^，。；]{0,40}(?:上界|下界|充分条件|必要条件|精确式|复杂度|算法输出|最短路)|"
+        r"模拟(?:执行|运行|队列)|解释失败机制|"
+        r"derive|prove|calculate",
+        scrubbed, re.I,
+    )
+    hits = sorted(set(current + explicit + external))
+    if hits:
+        target = "SEARCH_FIRST_THEN_PROVE" if deduction else "FACT_RETRIEVAL_ONLY"
+        confidence = min(0.99, 0.88 + 0.02 * len(hits))
+    elif deduction or (profile or {}).get("activated"):
+        target = "MUST_NOT_SEARCH"
+        confidence = 0.9
+    else:
+        # A stable, ordinary knowledge question may be answered from model
+        # knowledge. Retrieval is an enhancement when explicitly needed, not
+        # an admission gate enforced by a local Wiki or encyclopedia.
+        target = "MODEL_KNOWLEDGE_ALLOWED"
+        confidence = 0.82
+    return {
+        "routing_target": target,
+        "confidence": round(confidence, 3),
+        "search_enabled": target in {"FACT_RETRIEVAL_ONLY", "SEARCH_FIRST_THEN_PROVE"},
+        "matched_external_signals": hits,
+        "matched_deduction_signals": sorted(set(deduction)),
+        "router_version": "evidence-router-v2",
+        "two_stage_action": ({
+            "step1_search_query": subject[:240],
+            "step2_deduction_rule": "冻结检索所得外部参数，再独立执行公式、单位和边界校验。",
+        } if target == "SEARCH_FIRST_THEN_PROVE" else None),
+    }
 
 
 def reasoning_prompt(profile: dict[str, Any], *, surface: str) -> str:

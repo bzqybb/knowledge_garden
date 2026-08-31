@@ -7,14 +7,27 @@ import os
 import re
 import socket
 import threading
+import time
 import traceback
+from urllib.error import HTTPError
+from http.cookies import SimpleCookie
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
-from core.agent import answer_from_wiki, briefing, daily_digest, hint_for_task, patrol_vault, save_agent_insight, update_agents_manifest
+from core.agent import answer_from_wiki, briefing, daily_digest, hint_for_task, patrol_vault, reanswer_with_feedback, save_agent_insight, update_agents_manifest
 from core.bilibili_mcp import read_video as read_bilibili_video, runtime_status as bilibili_mcp_status
+from core.beta_access import (
+    BetaAccessError,
+    beta_authenticate,
+    beta_logout,
+    beta_mode,
+    beta_status,
+    beta_user,
+    cloud_json,
+)
 from core.config import DATA_DIR, WEB_DIR, llm_config
 from core.compiler import ingest_raw, validate_links
 from core.engine import add_interest, analyze_frontier, article_preview_metadata, evaluate_review, weekly_report
@@ -22,12 +35,15 @@ from core.inspiration import explore_inspiration, save_inspiration_seed
 from core.feeds import describe_feed, list_followed_sources, list_frontier_material, refresh_feeds
 from core.llm import LLMError, chat, prewarm_understanding_model
 from core.learning_memory import LearningMemoryService
-from core.mindmap import build_mindmap
+from core.deepdiagram_adapter import build_local_diagram
+from core.deepdiagram_service import DeepDiagramServiceError, generate_with_full_service
+from core.mindmap import branch_diagram_blueprint, build_mindmap
+from core.multiuser import AUTH_REQUIRED, AuthRegistry, TenantGardenStore, env_flag
+from core.model_proxy import ModelProxyError, open_completion
 from core.obsidian import sync_vault, write_raw_material
 from core.paper_reader import deep_read_paper
 from core.pdf_ocr import start_background_textbook_ocr, textbook_ocr_status, windows_ocr_available
 from core.retrieval import build_semantic_links, ingest_pdf_directory, rebuild_domain_map, search_notes
-from core.storage import GardenStore
 from core.taxonomy import classify_unmounted_concepts, rebuild_concept_hierarchy
 from core.tracememo import (
     TraceMemoClient,
@@ -40,8 +56,9 @@ from core.tracememo import (
 from core.web_research import fetch_wechat_article_text
 
 
-STORE = GardenStore()
+STORE = TenantGardenStore()
 MEMORY = LearningMemoryService(STORE)
+AUTH = AuthRegistry()
 LLM_HEALTH_LOCK = threading.Lock()
 LLM_HEALTH = {
     "llm_configured": llm_config().enabled,
@@ -49,6 +66,166 @@ LLM_HEALTH = {
     "llm_status": "checking" if llm_config().enabled else "offline",
     "llm_message": "正在验证理解 API……" if llm_config().enabled else "尚未配置理解 API。",
 }
+ANALYSIS_JOBS_LOCK = threading.Lock()
+ANALYSIS_JOBS: dict[str, dict] = {}
+
+
+def _desktop_parent_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        synchronize = 0x00100000
+        wait_timeout = 0x00000102
+        handle = ctypes.windll.kernel32.OpenProcess(synchronize, False, pid)
+        if not handle:
+            return False
+        try:
+            return ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def start_desktop_parent_watchdog() -> None:
+    raw_pid = os.getenv("GARDEN_DESKTOP_PARENT_PID", "").strip()
+    if not raw_pid:
+        return
+    try:
+        parent_pid = int(raw_pid)
+    except ValueError:
+        return
+
+    def watch() -> None:
+        while _desktop_parent_alive(parent_pid):
+            time.sleep(0.75)
+        os._exit(0)
+
+    threading.Thread(target=watch, name="desktop-parent-watchdog", daemon=True).start()
+
+
+def queue_improvement_capture(
+    *, user_id: str, request_id: str, surface: str,
+    question: str, answer: str, metadata: dict,
+) -> dict:
+    """Keep consented evaluation capture off the user-visible response path."""
+    if beta_mode() and not AUTH_REQUIRED:
+        def capture_remote() -> None:
+            try:
+                cloud_json("/api/improvement/candidate", method="POST", payload={
+                    "request_id": request_id,
+                    "surface": surface,
+                    "question": question,
+                    "answer": answer,
+                    "metadata": dict(metadata),
+                })
+            except BetaAccessError:
+                # Evaluation contribution is optional and must never break the answer.
+                return
+
+        threading.Thread(
+            target=capture_remote, daemon=True,
+            name=f"beta-improvement-capture-{request_id[:8]}",
+        ).start()
+        return {"captured": None, "queued": True, "destination": "public_beta"}
+    status = AUTH.improvement_status(user_id)
+    if not status.get("consent"):
+        return {"captured": False, "reason": "not_consented"}
+
+    def capture() -> None:
+        try:
+            AUTH.capture_interaction(
+                user_id=user_id, request_id=request_id, surface=surface,
+                question=question, answer=answer, metadata=dict(metadata),
+            )
+        except Exception:
+            traceback.print_exc()
+
+    threading.Thread(
+        target=capture, daemon=True, name=f"improvement-capture-{request_id[:8]}",
+    ).start()
+    return {"captured": True, "queued": True}
+
+
+def record_improvement_feedback(
+    *, user_id: str, request_id: str, helpful: bool, note: str = "",
+) -> None:
+    if beta_mode() and not AUTH_REQUIRED:
+        def send_remote() -> None:
+            try:
+                cloud_json("/api/improvement/feedback", method="POST", payload={
+                    "request_id": request_id, "helpful": helpful, "note": note,
+                })
+            except BetaAccessError:
+                return
+
+        threading.Thread(
+            target=send_remote, daemon=True,
+            name=f"beta-improvement-feedback-{request_id[:8]}",
+        ).start()
+        return
+    AUTH.record_candidate_feedback(
+        user_id=user_id, request_id=request_id, helpful=helpful, note=note,
+    )
+
+
+def start_frontier_analysis_job(
+    *, user_id: str, title: str, text: str, url: str,
+) -> dict:
+    if not text.strip():
+        raise ValueError("请粘贴需要分析的文章摘要或正文")
+    job_id = uuid4().hex
+    job = {
+        "job_id": job_id, "user_id": user_id, "status": "running",
+        "phase": "extracting", "message": "正在分段通读材料并核对时间戳……",
+        "result": None, "error": "",
+    }
+    with ANALYSIS_JOBS_LOCK:
+        ANALYSIS_JOBS[job_id] = job
+
+    def run() -> None:
+        try:
+            with STORE.using_user(user_id):
+                with ANALYSIS_JOBS_LOCK:
+                    ANALYSIS_JOBS[job_id].update({
+                        "phase": "generating",
+                        "message": "GLM 正在汇总章节、核心论点、证据和观看路线……",
+                    })
+                # One source-level deep read replaces per-concept cards.  This
+                # avoids amplifying noisy transcript tokens into cards/tasks.
+                result = analyze_frontier(STORE, title, text, url, fast=True)
+            with ANALYSIS_JOBS_LOCK:
+                ANALYSIS_JOBS[job_id].update({
+                    "status": "complete", "phase": "complete",
+                    "message": "GLM 深度导读已完成，关键论点均保留原文证据。",
+                    "result": result,
+                })
+        except Exception as exc:
+            traceback.print_exc()
+            with ANALYSIS_JOBS_LOCK:
+                ANALYSIS_JOBS[job_id].update({
+                    "status": "failed", "phase": "failed",
+                    "message": "导读任务失败，输入内容已保留，可以直接重试。",
+                    "error": str(exc) or exc.__class__.__name__,
+                })
+
+    threading.Thread(
+        target=run, daemon=True, name=f"frontier-analysis-{job_id[:8]}",
+    ).start()
+    return {key: value for key, value in job.items() if key != "user_id"}
+
+
+def frontier_analysis_job(user_id: str, job_id: str) -> dict:
+    with ANALYSIS_JOBS_LOCK:
+        job = ANALYSIS_JOBS.get(job_id)
+        if not job or job.get("user_id") != user_id:
+            raise ValueError("导读任务不存在或已过期")
+        return {key: value for key, value in job.items() if key != "user_id"}
 
 
 def refresh_llm_health() -> dict:
@@ -71,7 +248,17 @@ def refresh_llm_health() -> dict:
             }
         except LLMError as exc:
             detail = str(exc).lower()
-            if "401" in detail or "authentication" in detail or "api key" in detail:
+            desktop_beta = beta_mode() and not AUTH_REQUIRED
+            if desktop_beta and ("401" in detail or "authentication" in detail):
+                message = "公测登录已失效，请退出账号后重新登录。"
+                status = "invalid_key"
+            elif desktop_beta and ("429" in detail or "rate limit" in detail):
+                message = "当前公测账号请求较多，请稍后再试。"
+                status = "limited"
+            elif desktop_beta:
+                message = "公测模型服务暂时无法连接，请检查网络后重试。"
+                status = "error"
+            elif "401" in detail or "authentication" in detail or "api key" in detail:
                 message = "API Key 验证失败，请用正确的服务商密钥重新配置。"
                 status = "invalid_key"
             elif "429" in detail or "rate limit" in detail or "insufficient" in detail:
@@ -97,6 +284,13 @@ def llm_health() -> dict:
 
 
 def wechat_connection_status() -> dict:
+    if AUTH_REQUIRED:
+        return {
+            "base_url": "", "token_configured": False, "token_saved": False,
+            "service_online": False, "authorized": False,
+            "message": "公开站点不读取服务器本机微信；请使用后续桌面连接器。",
+            "public_mode_disabled": True,
+        }
     base_url = STORE.setting("tracememo_base_url", "http://127.0.0.1:6131")
     summary = {
         "base_url": str(base_url), "token_configured": False, "token_saved": False,
@@ -233,6 +427,10 @@ class GardenHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            for name, value in getattr(self, "_extra_headers", []):
+                self.send_header(name, value)
+            self._extra_headers = []
             self.end_headers()
             self.wfile.write(payload)
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
@@ -240,6 +438,66 @@ class GardenHandler(BaseHTTPRequestHandler):
             # the worker finishes.  The work is still valid; there is simply no
             # response socket left to write to.
             return
+
+    def _session_token(self) -> str:
+        authorization = self.headers.get("Authorization", "").strip()
+        if authorization.casefold().startswith("bearer "):
+            return authorization[7:].strip()
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except Exception:
+            return ""
+        morsel = cookie.get("garden_session")
+        return morsel.value if morsel else ""
+
+    def _start_ndjson(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-store, no-transform")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+    def _ndjson(self, data: dict) -> None:
+        self.wfile.write((json.dumps(data, ensure_ascii=False) + "\n").encode("utf-8"))
+        self.wfile.flush()
+
+    def _set_session_cookie(self, token: str, *, clear: bool = False) -> None:
+        secure = env_flag("GARDEN_COOKIE_SECURE", False)
+        value = "" if clear else token
+        parts = [f"garden_session={value}", "Path=/", "HttpOnly", "SameSite=Lax"]
+        if secure:
+            parts.append("Secure")
+        parts.append("Max-Age=0" if clear else "Max-Age=1209600")
+        self._extra_headers = getattr(self, "_extra_headers", []) + [("Set-Cookie", "; ".join(parts))]
+
+    def _bind_authenticated_user(self) -> dict[str, str] | None:
+        if not AUTH_REQUIRED:
+            if beta_mode():
+                user = beta_user()
+                STORE.bind_user(user["id"] if user else "local")
+                return user
+            STORE.bind_user("local")
+            return {"id": "local", "email": "本地用户"}
+        user = AUTH.user_for_token(self._session_token())
+        if user:
+            STORE.bind_user(user["id"])
+        return user
+
+    def _require_authenticated_user(self) -> dict[str, str] | None:
+        user = self._bind_authenticated_user()
+        if not user:
+            self._json({"ok": False, "error": "请先登录", "code": "AUTH_REQUIRED"}, 401)
+            return None
+        return user
+
+    @staticmethod
+    def _local_only_api(path: str) -> bool:
+        prefixes = (
+            "/api/wechat/", "/api/bilibili/", "/api/textbooks/",
+            "/api/sync", "/api/ingest", "/api/agent/patrol",
+        )
+        return AUTH_REQUIRED and path.startswith(prefixes)
 
     def _body(self) -> dict:
         try:
@@ -264,17 +522,83 @@ class GardenHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store, max-age=0")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
         self.end_headers()
         self.wfile.write(payload)
+
+    def _serve_desktop_installer(self, *, include_body: bool = True) -> None:
+        configured = os.getenv("GARDEN_DESKTOP_INSTALLER_PATH", "").strip()
+        installer = Path(configured).expanduser().resolve() if configured else None
+        if not installer or not installer.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        size = installer.stat().st_size
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/vnd.microsoft.portable-executable")
+        self.send_header("Content-Length", str(size))
+        self.send_header(
+            "Content-Disposition",
+            'attachment; filename="KnowledgeGarden-Public-Beta-x64-setup.exe"',
+        )
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if not include_body:
+            return
+        with installer.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                self.wfile.write(chunk)
+
+    def do_HEAD(self) -> None:
+        if urlparse(self.path).path == "/downloads/windows":
+            self._serve_desktop_installer(include_body=False)
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         try:
+            if parsed.path == "/downloads/windows":
+                self._serve_desktop_installer()
+                return
+            if parsed.path == "/api/auth/status":
+                user = self._bind_authenticated_user()
+                beta = beta_status()
+                self._json({
+                    "ok": True,
+                    "required": AUTH_REQUIRED,
+                    "authenticated": bool(user),
+                    "allow_signup": True if beta["enabled"] and not AUTH_REQUIRED else AUTH.signup_allowed(),
+                    "user": user,
+                    "beta_required": beta["enabled"] and not AUTH_REQUIRED,
+                    "beta_authenticated": beta["authenticated"],
+                    "beta_user": beta["user"],
+                    "desktop_instance": os.getenv("GARDEN_DESKTOP_INSTANCE_ID", ""),
+                })
+                return
+            if parsed.path.startswith("/api/"):
+                user = self._require_authenticated_user()
+                if not user:
+                    return
+                if self._local_only_api(parsed.path):
+                    self._json({
+                        "ok": False,
+                        "error": "该功能需要用户电脑上的本地连接器，公开站点不会读取服务器本机资料。",
+                        "code": "LOCAL_CONNECTOR_REQUIRED",
+                    }, 403)
+                    return
+            else:
+                user = None
             if parsed.path == "/api/bootstrap":
                 model_health = llm_health()
                 self._json({
                     "stats": STORE.stats(),
                     "settings": {
+                        "public_mode": AUTH_REQUIRED,
+                        "beta_mode": beta_mode() and not AUTH_REQUIRED,
+                        "beta_account": beta_user(),
+                        "desktop_download_url": os.getenv("GARDEN_DESKTOP_DOWNLOAD_URL", ""),
                         "vault_path": STORE.setting("vault_path", ""),
                         "learning_level": STORE.setting("learning_level", "本科入门"),
                         "interests": STORE.setting("interests", []),
@@ -300,6 +624,12 @@ class GardenHandler(BaseHTTPRequestHandler):
                 kind = params.get("kind", [None])[0]
                 notes = list_frontier_material(STORE, 200) if kind == "frontier" else STORE.list_notes(kind, 200)
                 self._json({"notes": notes})
+            elif parsed.path == "/api/analyze/jobs":
+                params = parse_qs(parsed.query)
+                self._json({
+                    "ok": True,
+                    "job": frontier_analysis_job(user["id"], params.get("job_id", [""])[0]),
+                })
             elif parsed.path == "/api/textbooks/ocr/status":
                 self._json({"ok": True, "status": textbook_ocr_status(STORE)})
             elif parsed.path == "/api/cards":
@@ -315,6 +645,11 @@ class GardenHandler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "status": bilibili_mcp_status()})
             elif parsed.path == "/api/memory":
                 self._json(MEMORY.overview())
+            elif parsed.path == "/api/improvement/status":
+                if beta_mode() and not AUTH_REQUIRED:
+                    self._json(cloud_json("/api/improvement/status"))
+                else:
+                    self._json({"ok": True, "result": AUTH.improvement_status(user["id"])})
             elif parsed.path == "/api/wechat/status":
                 self._json({"ok": True, "status": wechat_connection_status()})
             elif parsed.path == "/api/wechat/recent":
@@ -348,8 +683,150 @@ class GardenHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             body = self._body()
-            if path == "/api/settings":
-                for key in ("vault_path", "learning_level", "interests", "frontier_focus", "textbook_directory"):
+            if path in {"/api/beta/login", "/api/beta/register"}:
+                if AUTH_REQUIRED or not beta_mode():
+                    raise ValueError("当前不是桌面公测模式")
+                user = beta_authenticate(
+                    str(body.get("email", "")), str(body.get("password", "")),
+                    register=path.endswith("/register"),
+                )
+                STORE.bind_user(user["id"])
+                with LLM_HEALTH_LOCK:
+                    LLM_HEALTH.update({
+                        "llm_configured": True, "llm_enabled": False,
+                        "llm_status": "checking", "llm_message": "正在连接公测模型服务……",
+                    })
+                threading.Thread(target=refresh_llm_health, daemon=True, name="beta-llm-health").start()
+                self._json({"ok": True, "user": user})
+                return
+            if path == "/api/beta/logout":
+                if AUTH_REQUIRED or not beta_mode():
+                    raise ValueError("当前不是桌面公测模式")
+                beta_logout()
+                STORE.bind_user("local")
+                with LLM_HEALTH_LOCK:
+                    LLM_HEALTH.update({
+                        "llm_configured": False, "llm_enabled": False,
+                        "llm_status": "offline", "llm_message": "请登录公测账号后使用模型能力。",
+                    })
+                self._json({"ok": True})
+                return
+            if path in {"/api/auth/desktop/login", "/api/auth/desktop/register"}:
+                if not AUTH_REQUIRED:
+                    raise ValueError("桌面登录接口只在公测服务器开放")
+                action_register = path.endswith("/register")
+                if action_register:
+                    user, token = AUTH.register(str(body.get("email", "")), str(body.get("password", "")))
+                else:
+                    user, token = AUTH.login(str(body.get("email", "")), str(body.get("password", "")))
+                self._json({"ok": True, "user": user, "token": token})
+                return
+            if path == "/api/auth/desktop/logout":
+                if not AUTH_REQUIRED:
+                    raise ValueError("桌面登录接口只在公测服务器开放")
+                AUTH.logout(self._session_token())
+                self._json({"ok": True})
+                return
+            if path == "/api/auth/register":
+                user, token = AUTH.register(str(body.get("email", "")), str(body.get("password", "")))
+                STORE.bind_user(user["id"])
+                self._set_session_cookie(token)
+                self._json({"ok": True, "user": user})
+                return
+            if path == "/api/auth/login":
+                user, token = AUTH.login(str(body.get("email", "")), str(body.get("password", "")))
+                STORE.bind_user(user["id"])
+                self._set_session_cookie(token)
+                self._json({"ok": True, "user": user})
+                return
+            if path == "/api/auth/logout":
+                AUTH.logout(self._session_token())
+                self._set_session_cookie("", clear=True)
+                STORE.bind_user("local")
+                self._json({"ok": True})
+                return
+            user = self._require_authenticated_user()
+            if not user:
+                return
+            if self._local_only_api(path):
+                self._json({
+                    "ok": False,
+                    "error": "该功能需要用户电脑上的本地连接器，公开站点不会读取服务器本机资料。",
+                    "code": "LOCAL_CONNECTOR_REQUIRED",
+                }, 403)
+                return
+            if path == "/api/model/v1/chat/completions":
+                if not AUTH_REQUIRED:
+                    self._json({"ok": False, "error": "模型代理只在公测服务器开放"}, 403)
+                    return
+                try:
+                    with open_completion(user["id"], body) as response:
+                        payload = response.read() if not body.get("stream") else None
+                        self.send_response(response.status)
+                        self.send_header(
+                            "Content-Type",
+                            response.headers.get("Content-Type", "application/json"),
+                        )
+                        self.send_header("Cache-Control", "no-store, no-transform")
+                        self.send_header("X-Content-Type-Options", "nosniff")
+                        if payload is not None:
+                            self.send_header("Content-Length", str(len(payload)))
+                        else:
+                            self.send_header("Connection", "close")
+                            self.close_connection = True
+                        self.end_headers()
+                        if payload is not None:
+                            self.wfile.write(payload)
+                        else:
+                            while chunk := response.read(4096):
+                                self.wfile.write(chunk)
+                                self.wfile.flush()
+                except ModelProxyError as exc:
+                    self._json({"ok": False, "error": str(exc)}, 429)
+                except HTTPError as exc:
+                    self._json({
+                        "ok": False,
+                        "error": f"公测模型上游暂时不可用（HTTP {exc.code}），请稍后重试",
+                    }, 503)
+                return
+            if path == "/api/improvement/candidate":
+                if not AUTH_REQUIRED:
+                    self._json({"ok": False, "error": "该接口只在公测服务器开放"}, 403)
+                    return
+                result = AUTH.capture_interaction(
+                    user_id=user["id"], request_id=str(body.get("request_id", "")),
+                    surface=str(body.get("surface", "desktop")),
+                    question=str(body.get("question", "")), answer=str(body.get("answer", "")),
+                    metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
+                )
+                self._json({"ok": True, "result": result})
+            elif path == "/api/improvement/feedback":
+                if not AUTH_REQUIRED:
+                    self._json({"ok": False, "error": "该接口只在公测服务器开放"}, 403)
+                    return
+                helpful = body.get("helpful")
+                if not isinstance(helpful, bool):
+                    raise ValueError("helpful 必须是 true 或 false")
+                AUTH.record_candidate_feedback(
+                    user_id=user["id"], request_id=str(body.get("request_id", "")),
+                    helpful=helpful, note=str(body.get("note", "")),
+                )
+                self._json({"ok": True})
+            elif path == "/api/improvement/consent":
+                consent = body.get("consent")
+                if not isinstance(consent, bool):
+                    raise ValueError("consent 必须是 true 或 false")
+                if beta_mode() and not AUTH_REQUIRED:
+                    self._json(cloud_json(
+                        "/api/improvement/consent", method="POST", payload={"consent": consent},
+                    ))
+                else:
+                    self._json({"ok": True, "result": AUTH.set_consent(user["id"], consent)})
+            elif path == "/api/settings":
+                setting_keys = ("learning_level", "interests", "frontier_focus") if AUTH_REQUIRED else (
+                    "vault_path", "learning_level", "interests", "frontier_focus", "textbook_directory"
+                )
+                for key in setting_keys:
                     if key in body:
                         STORE.set_setting(key, body[key])
                 self._json({"ok": True})
@@ -442,21 +919,14 @@ class GardenHandler(BaseHTTPRequestHandler):
                         full_text = fetch_wechat_article_text(article_url)
                         if len(re.sub(r"\s+", "", full_text)) < 180:
                             raise ValueError("公众号正文过短或被验证页拦截，暂不写入知识图谱")
-                        lines = [
-                            "> 来源：由用户授权，通过 TraceMemo 定位公众号文章，并回到原网址读取正文。",
-                            f"> 公众号：{article.get('account_name') or article.get('publisher') or candidate.get('talker', '')}",
-                            f"> 原文：{article_url}",
-                            f"> 发布时间：{article.get('sent_at') or candidate.get('time_range') or '未知'}",
-                            "> 边界：下文是从原网址取得的正文；自动分类必须引用正文证据，不能根据公众号名猜测。",
-                            "",
-                            "## 原文正文",
-                            "",
-                            full_text,
-                        ]
-                        path_obj = write_raw_material(
-                            vault, candidate["title"], "\n".join(lines), article_url,
-                            ["微信", "微信公众号", "用户确认", "已读取正文"], garden_type="frontier",
+                        # Official-account articles use the same evidence-bound
+                        # GLM deep-reading pipeline as pasted articles and Bilibili
+                        # transcripts.  Do not send them through the legacy raw
+                        # compiler, which created generic placeholder bridges.
+                        deep_read = analyze_frontier(
+                            STORE, candidate["title"], full_text, article_url,
                         )
+                        path_obj = Path(str(deep_read["raw_path"]))
                     else:
                         lines = [
                             "> 来源：由用户授权，通过 TraceMemo Local HTTP API 按需读取。",
@@ -478,7 +948,12 @@ class GardenHandler(BaseHTTPRequestHandler):
                     # Ordinary chat is personal evidence, not a factual source.
                     # Official-account articles may enter the compiler only after
                     # their actual body has been fetched from the original URL.
-                    ingest = ingest_raw(vault, raw_path, STORE) if source_kind == "official_account" else None
+                    ingest = ({
+                        "analysis_mode": deep_read["analysis_mode"],
+                        "guide_path": deep_read.get("guide_path", ""),
+                        "concepts": deep_read.get("concepts", []),
+                        "guide": deep_read.get("guide", {}),
+                    } if source_kind == "official_account" else None)
                     update_agents_manifest(vault)
                     sync_vault(vault, STORE)
                 reviewed = STORE.review_wechat_candidate(candidate_id, accepted, raw_path)
@@ -531,32 +1006,110 @@ class GardenHandler(BaseHTTPRequestHandler):
             elif path == "/api/links/validate":
                 vault = body.get("vault_path") or STORE.setting("vault_path", "")
                 self._json({"ok": True, "result": validate_links(vault)})
+            elif path == "/api/analyze/jobs":
+                self._json({
+                    "ok": True,
+                    "job": start_frontier_analysis_job(
+                        user_id=user["id"], title=str(body.get("title", "前沿材料")),
+                        text=str(body.get("text", "")), url=str(body.get("url", "")),
+                    ),
+                }, 202)
             elif path == "/api/analyze":
                 result = analyze_frontier(STORE, str(body.get("title", "前沿材料")), str(body.get("text", "")), str(body.get("url", "")))
                 vault = STORE.setting("vault_path", "")
-                if vault and result.get("raw_path"):
-                    raw_relative = str(Path(result["raw_path"]).resolve().relative_to(Path(vault).resolve())).replace("\\", "/")
-                    result["ingest"] = ingest_raw(vault, raw_relative, STORE)
+                if vault:
                     result["agents"] = update_agents_manifest(vault)
                 result["sync"] = sync_configured_vault()
                 self._json({"ok": True, "result": result})
+            elif path == "/api/mindmap/expand":
+                node_id = int(body.get("node_id", 0))
+                mindmap = build_mindmap(STORE)
+                blueprint = branch_diagram_blueprint(mindmap["tree"], node_id)
+                if not blueprint:
+                    raise ValueError("没有找到这个知识分支")
+                request_text = (
+                    f"把“{blueprint['research_object']}”的现有子树整理为层次清楚的局部思维导图。"
+                    "保持原有父子关系，必要时合并视觉分组，但不要创造新知识或改变长期分类。"
+                )
+                try:
+                    diagram = generate_with_full_service(
+                        user_request=request_text, kind="mindmap", blueprint=blueprint,
+                        allowed_source_ids=set(), timeout=90,
+                    )
+                    if diagram.get("status") != "ready":
+                        raise DeepDiagramServiceError(str(diagram.get("warning") or "图形未通过校验"))
+                except (DeepDiagramServiceError, TimeoutError, OSError) as exc:
+                    diagram = build_local_diagram(
+                        blueprint, requested_kind="mindmap", allowed_source_ids=set(),
+                        fallback_reason=f"DeepDiagram 暂时不可用：{str(exc)[:160]}",
+                    )
+                self._json({"ok": True, "result": {"diagram": diagram, "node_id": node_id}})
+            elif path == "/api/agent/stream":
+                history = body.get("history") if isinstance(body.get("history"), list) else []
+                self._start_ndjson()
+                try:
+                    result = answer_from_wiki(
+                        STORE, str(body.get("question", "")), history,
+                        str(body.get("session_id", "")) or None,
+                        on_text_delta=lambda delta: self._ndjson({"type": "delta", "text": delta}),
+                    )
+                    result["improvement_capture"] = queue_improvement_capture(
+                        user_id=user["id"], request_id=str(result.get("request_id", "")),
+                        surface="gardener_chat", question=str(body.get("question", "")),
+                        answer=str(result.get("answer", "")), metadata=result,
+                    )
+                    self._ndjson({"type": "result", "result": result})
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                    return
+                except Exception as exc:
+                    self._ndjson({"type": "error", "error": str(exc)})
             elif path == "/api/agent/ask":
                 history = body.get("history") if isinstance(body.get("history"), list) else []
-                self._json({"ok": True, "result": answer_from_wiki(
+                result = answer_from_wiki(
                     STORE,
                     str(body.get("question", "")),
                     history,
                     str(body.get("session_id", "")) or None,
-                )})
+                )
+                result["improvement_capture"] = queue_improvement_capture(
+                    user_id=user["id"], request_id=str(result.get("request_id", "")),
+                    surface="gardener_chat", question=str(body.get("question", "")),
+                    answer=str(result.get("answer", "")), metadata=result,
+                )
+                self._json({"ok": True, "result": result})
             elif path == "/api/agent/personalization-feedback":
                 helpful_value = body.get("helpful")
                 if not isinstance(helpful_value, bool):
                     raise ValueError("helpful 必须是 true 或 false")
-                self._json({"ok": True, "result": MEMORY.record_personalization_feedback(
+                feedback_result = MEMORY.record_personalization_feedback(
                     request_id=str(body.get("request_id", "")),
                     helpful=helpful_value,
                     feedback_note=str(body.get("feedback_note", "")),
-                )})
+                )
+                record_improvement_feedback(
+                    user_id=user["id"], request_id=str(body.get("request_id", "")),
+                    helpful=helpful_value, note=str(body.get("feedback_note", "")),
+                )
+                self._json({"ok": True, "result": feedback_result})
+            elif path == "/api/agent/reanswer":
+                history = body.get("history") if isinstance(body.get("history"), list) else []
+                result = reanswer_with_feedback(
+                    STORE,
+                    request_id=str(body.get("request_id", "")),
+                    feedback_note=str(body.get("feedback_note", "")),
+                    history=history,
+                )
+                record_improvement_feedback(
+                    user_id=user["id"], request_id=str(body.get("request_id", "")),
+                    helpful=False, note=str(body.get("feedback_note", "")),
+                )
+                result["improvement_capture"] = queue_improvement_capture(
+                    user_id=user["id"], request_id=str(result.get("request_id", "")),
+                    surface="gardener_reanswer",
+                    question=str((result.get("reanswer") or {}).get("revised_question") or ""),
+                    answer=str(result.get("answer", "")), metadata=result,
+                )
+                self._json({"ok": True, "result": result})
             elif path == "/api/agent/save":
                 result = save_agent_insight(
                     STORE,
@@ -749,11 +1302,12 @@ class GardenHTTPServer(ThreadingHTTPServer):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="知识花园智能体")
+    parser = argparse.ArgumentParser(description="致知花园智能体")
     parser.add_argument("--host", default=os.getenv("GARDEN_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.getenv("GARDEN_PORT", "8765")))
+    parser.add_argument("--port", type=int, default=int(os.getenv("GARDEN_PORT") or os.getenv("PORT") or "8765"))
     args = parser.parse_args()
     server = GardenHTTPServer((args.host, args.port), GardenHandler)
+    start_desktop_parent_watchdog()
     # A provider connection check can take tens of seconds when the network or
     # upstream model is slow.  Binding the local server must not wait for that
     # remote round trip: the UI can render the existing "checking" state and
@@ -789,12 +1343,12 @@ def main() -> None:
         name="retrieval-warmup",
     )
     retrieval_warm.start()
-    print(f"\n[Knowledge Garden] 知识花园已启动：http://{args.host}:{args.port}")
+    print(f"\n[Zhizhi Garden] 致知花园已启动：http://{args.host}:{args.port}")
     print("按 Ctrl+C 停止。API Key 仅在进程内存中解密使用。\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n知识花园已休眠。")
+        print("\n致知花园已休眠。")
     finally:
         stop_event.set()
         server.server_close()

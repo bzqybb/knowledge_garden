@@ -1,0 +1,61 @@
+name: Release desktop companion
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+
+jobs:
+  windows:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Python runtime
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: pnpm install --frozen-lockfile
+      - name: Prepare bundled Bilibili runtime
+        shell: pwsh
+        run: .\desktop\prepare_bilibili_runtime.ps1
+      - name: Prepare licensed bundled TraceMemo
+        shell: pwsh
+        env:
+          TRACEMEMO_REDISTRIBUTION_APPROVED: "true"
+          TRACEMEMO_BUNDLE_URL: "https://github.com/Wxw-Gu/TraceMemo/releases/download/v2.2.3/tracememo-2.2.3-setup.exe"
+          TRACEMEMO_SHA256: "3c0c89e463ea4acd5bbf36e2fbfbe72ad49bce6aaa39913b765c5ac596804dff"
+        run: .\desktop\prepare_bundled_components.ps1
+      - name: Verify single-installer contents
+        shell: pwsh
+        run: .\desktop\verify_release_components.ps1
+      - name: Build Python sidecar
+        shell: pwsh
+        run: .\desktop\build_sidecar.ps1
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: "知识花园桌面伴侣 ${{ github.ref_name }}"
+          releaseBody: "签名自动更新包。发布前请完成 Windows 代码签名。"
+          releaseDraft: true

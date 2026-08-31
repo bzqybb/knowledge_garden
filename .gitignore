@@ -49,8 +49,20 @@ tmp/
 # 演示文稿构建缓存、Office 锁文件和本地评测产物。
 .ppt-build/
 evals/reports/
+evals/debug_logs/
+evals/execution_plans/
+evals/results/
+evals/training/
 *.inspect.ndjson
 ~$*.pptx
 
 # Local third-party runtime downloaded by the DeepDiagram installer.
 vendor/
+node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/sidecar-dist/
+desktop/src-tauri/binaries/*.exe
+desktop/src-tauri/resources/tracememo/*.exe
+desktop/src-tauri/resources/bilibili/
+desktop/src-tauri/gen/

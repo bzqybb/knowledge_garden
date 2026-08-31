@@ -4,6 +4,7 @@ import json
 import hashlib
 import re
 import sqlite3
+import threading
 import unicodedata
 import uuid
 from contextlib import contextmanager
@@ -15,6 +16,7 @@ from core.config import DB_PATH, ensure_runtime_dirs
 
 
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")
+_SQLITE_CONNECTION_LOCK = threading.RLock()
 MIGRATION_TABLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -116,15 +118,20 @@ class GardenStore:
 
     @contextmanager
     def connect(self):
-        conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=5000")
-        try:
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        # The HTTP server, feed patrol and memory patrol share one local SQLite
+        # file.  Model/network work happens outside this block; only the short
+        # database transaction is serialized so concurrent user requests do not
+        # fail with "database is locked".
+        with _SQLITE_CONNECTION_LOCK:
+            conn = sqlite3.connect(self.path, timeout=15.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=15000")
+            try:
+                yield conn
+                conn.commit()
+            finally:
+                conn.close()
 
     @staticmethod
     def _sql_literal(value: str) -> str:

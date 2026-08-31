@@ -87,6 +87,11 @@ class LearningMemoryService:
     def complete_turn(self, context: GardenContext, result: dict[str, Any]) -> dict[str, Any]:
         assistant_id = self.new_id("message")
         now = utc_now()
+        answer_content = str(result.get("answer") or "").strip()
+        # A provider can occasionally return an empty body without raising.
+        # Keep the turn auditable without violating the database invariant;
+        # the marker is persistence metadata, not a fabricated user answer.
+        persisted_content = answer_content or "（本轮生成失败，未产生可展示回答）"
         with self.store.connect() as conn:
             conn.execute(
                 """INSERT INTO session_messages(
@@ -94,12 +99,13 @@ class LearningMemoryService:
                    ) VALUES(?,?,?,?,?,?,?,?)""",
                 (
                     assistant_id, context.session_id, context.request_id, "assistant",
-                    context.active_capability, str(result.get("answer", "")),
+                    context.active_capability, persisted_content,
                     json.dumps({
                         "evidence_layer": result.get("evidence_layer", "none"),
                         "citation_ids": [item.get("id") for item in result.get("citations", [])],
                         "personalization": result.get("personalization", {}),
                         "reasoning": result.get("reasoning", {}),
+                        "generation_failed": bool(result.get("generation_failed") or not answer_content),
                     }, ensure_ascii=False),
                     now,
                 ),
@@ -232,6 +238,30 @@ class LearningMemoryService:
                 (session_id, limit),
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
+
+    def request_turn(self, request_id: str) -> dict[str, Any]:
+        """Return the original user question and answer for a persisted request."""
+        request_id = request_id.strip()
+        if not request_id:
+            raise ValueError("缺少本轮 request_id")
+        with self.store.connect() as conn:
+            rows = conn.execute(
+                """SELECT session_id,role,content,metadata_json,created_at
+                   FROM session_messages WHERE request_id=?
+                   ORDER BY created_at,rowid""",
+                (request_id,),
+            ).fetchall()
+        user = next((row for row in rows if row["role"] == "user"), None)
+        assistant = next((row for row in reversed(rows) if row["role"] == "assistant"), None)
+        if not user or not assistant:
+            raise ValueError("没有找到需要重新讲解的完整问答")
+        return {
+            "request_id": request_id,
+            "session_id": str(user["session_id"]),
+            "question": str(user["content"]),
+            "answer": str(assistant["content"]),
+            "metadata": json.loads(assistant["metadata_json"] or "{}"),
+        }
 
     def active_memory_context(
         self,
@@ -454,6 +484,7 @@ class LearningMemoryService:
         request_id: str,
         helpful: bool,
         feedback_note: str = "",
+        as_teaching_preference: bool = True,
     ) -> dict[str, Any]:
         """Persist an explicit correction and update only hypotheses used this turn."""
         request_id = request_id.strip()
@@ -488,6 +519,7 @@ class LearningMemoryService:
             "request_id": request_id,
             "helpful": bool(helpful),
             "feedback_note": feedback_note.strip()[:500],
+            "as_teaching_preference": bool(as_teaching_preference),
             "strategy_summary": strategy,
             "reasoning_type": reasoning.get("type", "general"),
             "applied_claim_ids": used_claim_ids,
@@ -505,7 +537,7 @@ class LearningMemoryService:
         )
         changed: list[dict[str, Any]] = []
         with self.store.connect() as conn:
-            for claim_id in used_claim_ids:
+            for claim_id in used_claim_ids if as_teaching_preference else []:
                 claim = conn.execute(
                     "SELECT confidence,status FROM memory_claims WHERE claim_id=?",
                     (claim_id,),
@@ -535,7 +567,7 @@ class LearningMemoryService:
         # affect the next turn because ``used_claim_ids`` was empty. Keep the new
         # claim task-scoped; cross-task L3 promotion still requires repeated evidence.
         created_claim_id = None
-        explicit_preference = feedback_note.strip()[:500]
+        explicit_preference = feedback_note.strip()[:500] if as_teaching_preference else ""
         if explicit_preference:
             claim_text = explicit_preference
             self._upsert_claim(

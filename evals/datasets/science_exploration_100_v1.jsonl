@@ -1,0 +1,100 @@
+{"id":"SCI-MATH-01","discipline":"数学与抽象逻辑","topic":"拓扑学反例构建","question":"给定一个非紧致拓扑空间，构建连续但不均匀连续的实值函数，并通过 Python 绘图或数值序列展示反例性质。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MATH-02","discipline":"数学与抽象逻辑","topic":"符号代数同构验证","question":"利用 SymPy 编写脚本验证有限群关于同态核与像的第一同构定理；说明任意阶数 n 不能唯一确定群结构，并选择可复现实例。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MATH-03","discipline":"数学与抽象逻辑","topic":"微分几何测地线","question":"推导二维球面与双曲面上的测地线方程，并编写数值积分器求解给定两点间的测地线，比较几何差异。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MATH-04","discipline":"数学与抽象逻辑","topic":"偏微分方程收敛性","question":"针对热传导方程的隐式差分格式，通过 Lax 等价定理证明稳定性与收敛性，并用代码验证误差阶。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MATH-05","discipline":"数学与抽象逻辑","topic":"概率图模型推导","question":"推导贝叶斯网络中的条件独立性与 d-分离，并利用 pgmpy 建立一个 10 节点因果图执行条件概率查询。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MATH-06","discipline":"数学与抽象逻辑","topic":"测度论定理推导","question":"从第一性原理推导勒贝格控制收敛定理，并设计数值实验展示一个黎曼积分不适用而勒贝格积分可处理的函数。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MATH-07","discipline":"数学与抽象逻辑","topic":"图论极值问题","question":"对 Ramsey 数 R(3,3) 进行组合穷举与形式化论证，证明其值为 6，并用程序验证上下界。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MATH-08","discipline":"数学与抽象逻辑","topic":"模形式与数论","question":"计算 Eisenstein 级数的 Fourier 展开系数，并用算法在有限范围验证 Ramanujan tau 函数的乘性关系，说明验证不等于一般证明。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MATH-09","discipline":"数学与抽象逻辑","topic":"一阶逻辑相容性","question":"构造一组具有量词的一阶逻辑公理，调用 Z3 或等价 SMT/SAT 工具验证有限域相容性并输出模型，同时说明有限模型检查的边界。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MATH-10","discipline":"数学与抽象逻辑","topic":"NP难问题近似算法","question":"针对满足三角不等式的旅行商问题实现 Christofides 1.5 近似算法，推导近似界并用实例对比最优解。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-PHYS-01","discipline":"物理学与复杂系统","topic":"非线性动力学分岔","question":"建模 Logistic 映射分岔图，数值估计 Feigenbaum 常数 delta 约 4.669，并定位周期窗口与混沌吸引子。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-PHYS-02","discipline":"物理学与复杂系统","topic":"哈密顿力学连续场","question":"从拉格朗日量密度推导 Klein-Gordon 场的正则动量与哈密顿形式，求平面波解并用符号计算检查方程。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-PHYS-03","discipline":"物理学与复杂系统","topic":"相变与统计物理","question":"实现二维 Ising 模型的 Metropolis Monte Carlo，提取临界温度附近的磁化率与比热峰，并做有限尺寸与误差分析。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-PHYS-04","discipline":"物理学与复杂系统","topic":"量子张量网络","question":"利用 TensorNetwork 或等价张量运算建立一维量子自旋链 MPS，求基态能量并与小系统精确对角化对比。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-PHYS-05","discipline":"物理学与复杂系统","topic":"湍流封闭问题","question":"从 Navier-Stokes 方程推导 Reynolds 平均形式，说明 Reynolds 应力闭合问题并构建 k-epsilon 模型的物理逻辑与数值检查。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-PHYS-06","discipline":"物理学与复杂系统","topic":"黑洞轨道与红移","question":"推导 Kerr 度规赤道面无碰撞粒子测地线的有效势，计算极值转动黑洞顺行与逆行 ISCO，并进行数值验证。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-PHYS-07","discipline":"物理学与复杂系统","topic":"超导理论自由能","question":"构建 Ginzburg-Landau 自由能泛函，推导相干长度、穿透深度、kappa 以及一类与二类超导体的 Hc1/Hc2 条件，并数值作图。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-PHYS-08","discipline":"物理学与复杂系统","topic":"磁流体力学","question":"推导等离子体中的 Alfvén 波传播方程，通过一维网格模拟有耗散波包并验证相速度和能量衰减。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-PHYS-09","discipline":"物理学与复杂系统","topic":"非平衡态涨落","question":"推导 Jarzynski 等式，生成或读取非平衡功轨迹估计自由能差 Delta F，并分析指数平均的偏差与收敛。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-PHYS-10","discipline":"物理学与复杂系统","topic":"复杂网络同步","question":"构建 Kuramoto 耦合相位振子模型，推导临界耦合强度并数值演示序参量从无序到同步的变化。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CHEM-01","discipline":"化学与分子科学","topic":"逆合成路线设计","question":"以布洛芬为可复现实例，调用 RDKit 解析分子图并设计逆合成拆解；区分图变换建议与经反应数据库或实验确认的可行路线。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CHEM-02","discipline":"化学与分子科学","topic":"DFT反应屏障提取","question":"设计程序解析过渡态计算输出，提取唯一虚频、振动模式和 IRC 势能面；若无波函数文件则生成明确标注的最小模拟输入进行验证。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CHEM-03","discipline":"化学与分子科学","topic":"药效团结构生成","question":"编写基于配体结合口袋几何约束的三维分子生成与构象采样原型，使用 RDKit 或等价工具验证距离约束与化学有效性。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CHEM-04","discipline":"化学与分子科学","topic":"超分子自组装动力学","question":"构建胶束自组装 Master Equation，模拟聚集数分布和临界胶束浓度 CMC，并检查质量守恒与稳态。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CHEM-05","discipline":"化学与分子科学","topic":"晶体几何解析","question":"解析一个可复现的钙钛矿 CIF，计算配位数、八面体畸变指数与 Goldschmidt 容忍因子，并讨论周期边界和离子半径选择。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CHEM-06","discipline":"化学与分子科学","topic":"配合物场分裂","question":"推导八面体与四面体晶体场下 d 轨道分裂和 10Dq 关系，计算示例配合物的高低自旋条件并讨论光谱选择定则。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CHEM-07","discipline":"化学与分子科学","topic":"电化学界面模型","question":"建立双电层与 Butler-Volmer 动力学耦合模型，模拟循环伏安曲线并验证扫描速率、交换电流和传质参数的影响。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CHEM-08","discipline":"化学与分子科学","topic":"波谱结构推导","question":"设计联合使用 1H-NMR、13C-NMR 与 MS 特征的分子结构候选排序算法，用一组明确的合成谱数据验证并报告结构不可辨识性。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CHEM-09","discipline":"化学与分子科学","topic":"多相催化吸附能","question":"推导 Langmuir-Hinshelwood 机理的速率式，根据一组明确吸附能构建 volcano plot，并检查速率控制步骤变化。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CHEM-10","discipline":"化学与分子科学","topic":"圆锥交叉非绝热过程","question":"建立双态双模式圆锥交叉模型，计算势能面交叉附近的非绝热跃迁概率，并与 Landau-Zener 极限比较。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-BIO-01","discipline":"生物学与生命科学","topic":"单细胞轨迹重构","question":"编写单细胞 RNA-seq 伪时间分析流程，将高维表达映射为分化树；用合成分叉数据验证轨迹恢复并讨论批次效应。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-BIO-02","discipline":"生物学与生命科学","topic":"蛋白质变构识别","question":"从一个明确 PDB 结构构建残基接触网络，用中心性和扰动传播识别候选变构位点，并与已知或合成对照验证。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-BIO-03","discipline":"生物学与生命科学","topic":"基因网络ODE建模","question":"建立含正负反馈的 toggle switch 动力学方程，求双稳态阈值和分岔图，并用数值积分验证吸引域。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-BIO-04","discipline":"生物学与生命科学","topic":"CRISPR效率预测","question":"解析 sgRNA 与靶 DNA 的结合能及错配位置，构造可解释的 Cas9 脱靶风险评分并用合成序列做敏感性验证；不得把模型分数当临床结论。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-BIO-05","discipline":"生物学与生命科学","topic":"选择消除检测","question":"用群体基因组 SNP 矩阵计算 FST 与核苷酸多样性 pi，定位选择信号并用中性模拟评估假阳性。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-BIO-06","discipline":"生物学与生命科学","topic":"神经元动作电位","question":"实现 Hodgkin-Huxley 四维 ODE，模拟不同刺激电流下动作电位阈值与频率，并检查门控变量和单位。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-BIO-07","discipline":"生物学与生命科学","topic":"代谢流平衡分析","question":"利用 COBRApy 或等价线性规划加载大肠杆菌代谢网络，最大化生物量并通过基因敲除或通量边界验证解。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-BIO-08","discipline":"生物学与生命科学","topic":"冷冻电镜模型拟合","question":"对明确的三维密度与原子坐标示例计算交叉相关系数 CCC，优化刚体叠合并用留出区域检查过拟合。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-BIO-09","discipline":"生物学与生命科学","topic":"表观遗传调控机制","question":"构建 DNA 甲基化与 H3K4me3 对启动子激活概率的非线性模型，用合成数据拟合并讨论相关性与因果性的边界。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-BIO-10","discipline":"生物学与生命科学","topic":"系统发育树极大似然法","question":"给定可复现 DNA 比对矩阵，在 Jukes-Cantor 模型下计算候选树对数似然并优化小规模拓扑，与距离法结果比较。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CS-01","discipline":"计算机与算法工程","topic":"无锁数据结构验证","question":"设计基于 CAS 的 lock-free 队列，编写多线程竞争测试并论证线性化点、无锁进展与 ABA 风险。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CS-02","discipline":"计算机与算法工程","topic":"分布式共识证明","question":"形式化描述 Raft 在网络分区下的 leader 选举与日志复制安全性，构造状态机或模型检查小实例验证 election safety 与 leader completeness。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CS-03","discipline":"计算机与算法工程","topic":"编译器向量化优化","question":"实现或给出可编译的 LLVM IR 循环展开与 SIMD 向量化 pass，使用基准和生成 IR 验证语义等价与性能变化。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CS-04","discipline":"计算机与算法工程","topic":"零知识证明多项式","question":"将一个明确算术电路转成 R1CS/QAP 约束，计算见证与多项式并验证约束满足；区分教学参数与安全证明参数。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CS-05","discipline":"计算机与算法工程","topic":"缓存替换自适应算法","question":"推导 LRFU 衰减权重，实现并发访问模拟，比较 LRU/LFU/LRFU 的命中率、击穿率和参数敏感性。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CS-06","discipline":"计算机与算法工程","topic":"硬件形式化检查","question":"用 SMT 求解器检查一个明确的流水线 CPU Verilog 模块是否存在数据冒险或死锁，给出反例轨迹并验证修复。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CS-07","discipline":"计算机与算法工程","topic":"大图划分并行算法","question":"实现 Edge-Cut 与 Vertex-Cut 图划分策略，在可复现的大图或合成幂律图上比较负载均衡、切割率与通信量。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CS-08","discipline":"计算机与算法工程","topic":"操作系统页表缺页","question":"建立多级页表在 TLB miss 与缺页情况下的内存访问时延模型，计算参数化实例并比较 huge page、页表层数和 TLB 策略。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CS-09","discipline":"计算机与算法工程","topic":"信道译码算法","question":"实现 LDPC belief propagation 迭代译码，在不同 SNR 下模拟 BER 曲线并验证停止准则、码长与迭代次数影响。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-CS-10","discipline":"计算机与算法工程","topic":"高性能CUDA Kernel","question":"编写稀疏矩阵乘法 SpMM 的 CUDA kernel，优化 shared memory 与 warp 分流；无 GPU 时提供可编译代码和 CPU 对照，明确未实测性能。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-AI-01","discipline":"人工智能与大模型前沿","topic":"Transformer表达能力极限","question":"在明确假设下推导 softmax attention 处理长序列时的一种上界或表达退化机制，并用数值实验验证尺度趋势，避免把条件性结论表述成普适定理。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-AI-02","discipline":"人工智能与大模型前沿","topic":"KV Cache稀疏压缩","question":"设计基于累计注意力权重的流式 KV cache 剪枝算法，计算内存复杂度并用小模型或合成 attention 测试保留率与近似误差。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-AI-03","discipline":"人工智能与大模型前沿","topic":"过程奖励模型","question":"设计 MCTS 自动标记多步推理 PRM 步骤正确性的管道，给出伪代码、可执行小环境和标签质量验证，分析自举偏差。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-AI-04","discipline":"人工智能与大模型前沿","topic":"随机微分方程Diffusion","question":"推导 score-based 连续时间 SDE 的正向与逆向过程，实现 Euler-Maruyama 采样器并在二维分布上验证。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-AI-05","discipline":"人工智能与大模型前沿","topic":"具身智能视触觉融合","question":"构建视觉点云与触觉力矩特征融合的注意力抓取策略原型，用合成多模态数据验证维度、掩码和消融效果。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-AI-06","discipline":"人工智能与大模型前沿","topic":"大模型自我纠错机制","question":"设计无需外部 ground truth 的概率自省与多采样一致性算法，给出可执行评测原型，并说明为何自信或一致不等于事实正确。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-AI-07","discipline":"人工智能与大模型前沿","topic":"非完美信息博弈","question":"实现 CFR 求解 Kuhn Poker 的近似 Nash 均衡，报告平均策略、exploitability 或 regret 收敛并与理论值比较。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-AI-08","discipline":"人工智能与大模型前沿","topic":"对齐算法梯度推导","question":"在统一符号与简化策略模型下推导 DPO、GRPO、PPO 的目标和梯度，数值比较更新方向；避免无条件声称某算法收敛更快。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-AI-09","discipline":"人工智能与大模型前沿","topic":"神经符号定理证明","question":"设计 LLM 生成中间引理与 Lean 4 验证闭环，在一个可复现小定理上展示失败反馈、修复和最终 kernel 检查。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-AI-10","discipline":"人工智能与大模型前沿","topic":"表征坍缩数学证明","question":"分析 InfoNCE 在超球面上的均匀性与坍缩条件，区分有限 batch 和总体目标，使用数值优化展示表征分布趋势。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-QI-01","discipline":"量子信息与计算","topic":"VQE变分量子求解","question":"使用 Qiskit 或等价模拟器实现 H2 分子 VQE，加入明确噪声模型，比较精确基态能量并分析 ansatz 与测量误差。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-QI-02","discipline":"量子信息与计算","topic":"表面码纠错","question":"建模小型二维 surface code 的 syndrome 测量，使用 MWPM 或可解释替代解码器纠正比特翻转并估计逻辑错误率。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-QI-03","discipline":"量子信息与计算","topic":"量子相位估计不确定度","question":"推导 QPE 使用 t 个辅助比特时的相位误差与成功概率界，实现逆 QFT 步骤并用状态向量模拟验证。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-QI-04","discipline":"量子信息与计算","topic":"脉冲级量子门优化","question":"实现简化 GRAPE 算法优化单或双量子比特控制脉冲，计算保真度梯度并验证幅度、带宽与鲁棒性约束。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-QI-05","discipline":"量子信息与计算","topic":"量子中继纠缠交换","question":"建模多段量子中继通过 BSM 进行纠缠交换，推导并数值计算成功率与保真度随段数和噪声的变化。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-QI-06","discipline":"量子信息与计算","topic":"量子随机游走搜索","question":"构建一个明确图上的量子游走搜索算法，推导查询复杂度并用小规模矩阵模拟比较经典搜索；说明二次加速的条件。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-QI-07","discipline":"量子信息与计算","topic":"Jordan-Wigner映射","question":"把一个明确二次量子化费米哈密顿量映射为 Pauli 串，实现映射并对可对易测量组进行分组验证。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-QI-08","discipline":"量子信息与计算","topic":"拓扑量子编织","question":"建立 Majorana zero mode 在 T 型纳米线中的交换编织有效模型，计算幺正变换并数值检查反对易关系与拓扑保护条件。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-QI-09","discipline":"量子信息与计算","topic":"量子压缩态相位测量","question":"推导自旋或光学压缩态的相位灵敏度，比较 SQL 与 Heisenberg 标度，并用有限 N 数值模型验证且区分资源计数。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-QI-10","discipline":"量子信息与计算","topic":"QKD协议安全边界","question":"推导 BB84 在 intercept-resend 攻击下的 QBER，模拟有限密钥抽样并说明 25% 扰动与实际安全阈值不是同一概念。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-SYNBIO-01","discipline":"合成生物学与工程基因组","topic":"基因组碎片拼接","question":"针对一个明确的超过 100kb 合成 DNA 示例，生成 OE-PCR 与酵母重组的分片和引物设计算法；只做计算设计，不给湿实验操作参数，并验证覆盖与特异性。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-SYNBIO-02","discipline":"合成生物学与工程基因组","topic":"基因逻辑门稳定性","question":"建立含转录阻抑与 RNA 交互的 AND/NAND 回路随机模型，模拟噪声下误触发率并做参数敏感性分析。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-SYNBIO-03","discipline":"合成生物学与工程基因组","topic":"无细胞表达动力学","question":"建立 cell-free 表达系统的底物消耗、酶失活、mRNA 降解 ODE，拟合或生成合成曲线并检查可辨识性与质量平衡。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-SYNBIO-04","discipline":"合成生物学与工程基因组","topic":"De Novo蛋白质设计","question":"设计双链螺旋 bundle 的计算筛选流程和可复现玩具模型，通过能量函数或短程分子动力学验证界面稳定性；不宣称得到实验可用蛋白。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-SYNBIO-05","discipline":"合成生物学与工程基因组","topic":"辅因子代谢重定向","question":"构建大肠杆菌 NADH/NADPH 生成消耗的动力学或约束模型，优化目标通量并验证辅因子守恒及通量权衡。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-SYNBIO-06","discipline":"合成生物学与工程基因组","topic":"CRISPRi全基因组抑制","question":"设计多靶点 CRISPRi gRNA 组合的计算评分与竞争模型，使用公开式样或合成序列验证脱靶和资源竞争；不输出可直接执行的病原体改造方案。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-SYNBIO-07","discipline":"合成生物学与工程基因组","topic":"定向进化突变库","question":"构建 error-prone PCR 突变数与位点覆盖概率模型，计算达到给定覆盖率的库容量并用 Monte Carlo 验证。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-SYNBIO-08","discipline":"合成生物学与工程基因组","topic":"人工染色体稳定性","question":"建立人工染色体着丝粒附着与有丝分裂分离的随机动力学模型，计算每代丢失率并与模拟分布比较。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-SYNBIO-09","discipline":"合成生物学与工程基因组","topic":"群落演化博弈","question":"构建工程菌合成者与消耗者的 replicator dynamics，求平衡与稳定性并数值展示参数导致的共存或淘汰。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-SYNBIO-10","discipline":"合成生物学与工程基因组","topic":"非天然氨基酸翻译","question":"建立 UAG 抑制与正交 tRNA/aaRS 识别的计算评价模型，分析效率与串扰的权衡；保持在序列特征和模拟层面并说明实验验证需求。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MAT-01","discipline":"先进材料与清洁能源","topic":"高熵合金相稳定性","question":"对一个明确五元高熵合金组成计算混合熵与混合焓近似，使用经验判据预测固溶体或相分离并讨论判据局限。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MAT-02","discipline":"先进材料与清洁能源","topic":"锂枝晶应力场","question":"建立固态电解质界面锂沉积的弹性应力集中模型，推导临界电流密度的参数关系并用有限差分或有限元玩具模型验证。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MAT-03","discipline":"先进材料与清洁能源","topic":"二维异质结能带对齐","question":"设计 MoS2/WS2 异质结 Type-I/II 能带对齐的第一性原理计算流程；没有 DFT 环境时用明确示例数据完成后处理并标注未执行部分。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MAT-04","discipline":"先进材料与清洁能源","topic":"钙钛矿非辐射复合","question":"推导钙钛矿深能级陷阱的 Shockley-Read-Hall 复合动力学，数值计算寿命与开路电压损失的参数趋势。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MAT-05","discipline":"先进材料与清洁能源","topic":"MOF气体吸附预测","question":"建立简化 GCMC 模型计算 MOF 对 CO2/CH4 的吸附等温线和选择性，验证接受率、平衡与有限尺寸影响。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MAT-06","discipline":"先进材料与清洁能源","topic":"超导Tc特征提取","question":"用晶体结构图构建 GNN 预测电子-声子耦合 lambda 的可复现原型，明确小数据拆分、基线和不确定性，避免数据泄漏。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MAT-07","discipline":"先进材料与清洁能源","topic":"电催化CO2RR路径","question":"用一组明确自由能或可复现示例绘制铜基 CO2 还原至 C2H4 的 CPET 自由能图，识别限制电位并讨论表面覆盖和溶剂效应。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MAT-08","discipline":"先进材料与清洁能源","topic":"热电材料声子散射","question":"建立声子-声子和晶界散射对晶格热导率的 Matthiessen 模型，计算 kL 与 ZT 并优化粒径时检查电子输运权衡。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MAT-09","discipline":"先进材料与清洁能源","topic":"质子交换膜水气管理","question":"建立 PEMFC 扩散层气液两相 Brinkman 模型，数值分析含水量与传质极化导致的极限电流下降并检查边界条件。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-MAT-10","discipline":"先进材料与清洁能源","topic":"自愈合网络动态共价键","question":"建立 Diels-Alder 动态键控制的自愈合聚合物应力恢复动力学，拟合合成数据并比较单指数与网络模型。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-ASTRO-01","discipline":"天体物理与深空探索","topic":"引力波形EOB","question":"建立简化 EOB 双黑洞哈密顿量与 inspiral-to-ringdown 拼接流程，生成波形并检查能量、频率连续性和参数边界。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-ASTRO-02","discipline":"天体物理与深空探索","topic":"系外行星光谱反演","question":"实现简化大气透射光谱前向模型和贝叶斯反演，从合成光谱估计 H2O/CO2 丰度并展示后验退化。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-ASTRO-03","discipline":"天体物理与深空探索","topic":"多体引力助推轨道","question":"求解地月 CR3BP，计算 L1/L2 周围轨道或稳定流形的低能转移示例，并验证 Jacobi 常数与积分误差。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-ASTRO-04","discipline":"天体物理与深空探索","topic":"暗物质散射截面","question":"推导 WIMP 自旋无关核散射的微分反冲谱，在明确 halo 假设下比较不同靶核并数值检查单位与阈值效应。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-ASTRO-05","discipline":"天体物理与深空探索","topic":"恒星核合成r过程","question":"构建简化 r-process 中子捕获与 beta 衰变反应网络，计算丰度随时间演化并检查核素数守恒与输入核数据敏感性。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-ASTRO-06","discipline":"天体物理与深空探索","topic":"相对论喷流MHD","question":"建立 AGN 相对论 MHD 喷流的简化磁加速模型，推导磁化率与 Lorentz 因子关系并数值验证能量通量守恒。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-ASTRO-07","discipline":"天体物理与深空探索","topic":"深空自主脉冲星导航","question":"用 X 射线脉冲星 TOA 构建 EKF 深空导航模型，通过合成轨迹估计位置速度并分析可观测性与时钟误差。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-ASTRO-08","discipline":"天体物理与深空探索","topic":"宇宙微波背景CMB","question":"解释 Boltzmann 求解器计算 CMB 功率谱的方程链，调用 CLASS/CAMB 或明确示例数据分析声学峰对 Omega_b、Omega_c 的敏感性。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-ASTRO-09","discipline":"天体物理与深空探索","topic":"中子星方程与TOV","question":"给定一个或多个明确 EOS，数值求解 TOV 方程得到质量-半径曲线和最大质量，并检查中心条件、单位与稳定分支。","expected_route":"prepare_closed_loop"}
+{"id":"SCI-ASTRO-10","discipline":"天体物理与深空探索","topic":"磁层重联动力学","question":"建立太阳风与地球磁层顶的简化磁重联模型，计算 inflow/outflow 与磁通转换率，并与 Sweet-Parker 或 Petschek 标度比较。","expected_route":"prepare_closed_loop"}

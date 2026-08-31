@@ -122,7 +122,9 @@ def temporary_store(source_db: str | Path) -> Iterator[GardenStore]:
         yield GardenStore(target)
 
 
-def run_graph_case(store: GardenStore, case: dict[str, Any]) -> dict[str, Any]:
+def run_graph_case(
+    store: GardenStore, case: dict[str, Any], *, force_full_graph: bool = True,
+) -> dict[str, Any]:
     question = str(case["question"])
     session_id = f"eval-{case['id']}-{uuid.uuid4()}"
     memory = LearningMemoryService(store)
@@ -135,7 +137,9 @@ def run_graph_case(store: GardenStore, case: dict[str, Any]) -> dict[str, Any]:
         message_id=turn["message_id"],
     )
     started = time.perf_counter()
-    result = run_gardener_graph(store, context, include_evaluation_context=True)
+    result = run_gardener_graph(
+        store, context, include_evaluation_context=force_full_graph,
+    )
     memory.complete_turn(context, result)
     evaluation = result.pop("evaluation_context", {})
     return {
@@ -152,6 +156,8 @@ def run_graph_case(store: GardenStore, case: dict[str, Any]) -> dict[str, Any]:
         "reference": str(case.get("reference", "")),
         "should_abstain": bool(case.get("should_abstain", False)),
         "answer": result.get("answer", ""),
+        "answer_mode": result.get("answer_mode", "garden_enhanced"),
+        "route": result.get("route", {}),
         "reasoning": result.get("reasoning", {}),
         "evidence_layer": result.get("evidence_layer", "none"),
         "retrieved_contexts": evaluation.get("retrieved_contexts", []),

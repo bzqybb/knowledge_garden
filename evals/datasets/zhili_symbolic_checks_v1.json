@@ -1,0 +1,17 @@
+{
+  "ZS-MATH-01": [
+    {"id": "affine_form", "target_lhs": "f(x)", "symbols": ["a", "b", "x"], "rhs": "a*x+b"}
+  ],
+  "ZS-PHYS-01": [
+    {"id": "quartic_second_order", "target_lhs": "E_0^{(2)}", "target_aliases": ["E0^{(2)}", "E_0_2", "E₀⁽²⁾"], "symbols": ["lambda_", "hbar", "m", "omega"], "rhs": "-21*lambda_**2*hbar**3/(8*m**4*omega**5)"}
+  ],
+  "ZS-PCHEM-01": [
+    {"id": "para_heat_capacity", "target_lhs": "C_V", "target_aliases": ["C_{V,m}", "C_{V,m}^{para}"], "accepted_relations": ["=", "≈"], "symbols": ["R", "Theta_r", "T", "e"], "rhs": "180*R*(Theta_r/T)**2*e**(-6*Theta_r/T)"}
+  ],
+  "ZS-TCS-01": [
+    {"id": "cheeger_lower_bound", "target_lhs": "h(G)", "target_aliases": ["h"], "relation": ">=", "symbols": ["lambda_2"], "rhs": "lambda_2/2"}
+  ],
+  "ZS-BIO-01": [
+    {"id": "hill_critical_slope", "target_lhs": "f'(x^*)", "target_aliases": ["g", "b", "beta", "β"], "alias_context_pattern": "Jacobian|J=|偏导|导数|斜率|失稳|临界|化简得|其中\\s*[gGbBβ]", "symbols": ["n", "x_star", "s"], "rhs": "n*s**n/(1+s**n)"}
+  ]
+}

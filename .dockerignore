@@ -1,0 +1,16 @@
+.git
+.venv
+.venv.*
+data
+evals/reports
+pip
+vendor
+__pycache__
+*.pyc
+*.pyd
+*.db
+*.sqlite*
+.env*
+~$*
+*.pptx
+*.docx

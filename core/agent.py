@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import re
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from core.compiler import ingest_raw
 from core.config import llm_config
@@ -22,6 +23,90 @@ from core.web_research import search_academic_articles
 
 MANAGED_START = "<!-- knowledge-gardener:agent:start -->"
 MANAGED_END = "<!-- knowledge-gardener:agent:end -->"
+
+
+_REANSWER_STYLE_PATTERNS = (
+    r"简单|通俗|直白|详细|简洁|术语|案例|例子|多举例|举个例|先举|类比|比喻|分步骤|"
+    r"先讲|再讲|再解释|公式|图示|口语|学术|严谨|慢一点|快一点|换一种讲法|换个说法|"
+    r"换一种方法|换个方法|改用.{0,8}方法|用.{0,8}(?:方法|方式)(?:讲|解释|回答)|"
+    r"费曼(?:学习)?法|苏格拉底(?:式|法)"
+)
+_REANSWER_INTENT_PATTERNS = (
+    r"我问的是|我说的是|我指的是|我的意思是|理解错了|理解偏了|答偏了|跑题|"
+    r"不是.{0,40}是|应为|应该是|其实想问|问题改成|主题改成"
+)
+_REANSWER_SCOPE_PATTERNS = r"还要考虑|也要考虑|还包括|也包括|加入|补充|扩展到|范围|除此之外|另外讨论"
+_REANSWER_CHALLENGE_PATTERNS = r"你说错|回答错|结论不对|推导不对|计算错误|这一步不对|来源不对|事实错误"
+
+
+def classify_reanswer_feedback(feedback_note: str) -> dict[str, Any]:
+    """Classify a re-answer note before deciding whether to preserve the question.
+
+    Feedback submitted from the "this explanation does not suit me" control is
+    not necessarily a teaching preference.  A short noun phrase after ``改成：``
+    is usually an intent correction, while requests such as ``讲简单点`` should
+    leave the original question and evidence route untouched.
+    """
+    note = re.sub(r"\s+", " ", str(feedback_note or "")).strip()[:500]
+    scores = {
+        "STYLE_CHANGE": 0,
+        "INTENT_CORRECTION": 0,
+        "SCOPE_CHANGE": 0,
+        "FACTUAL_CHALLENGE": 0,
+    }
+    scores["STYLE_CHANGE"] += 2 * len(re.findall(_REANSWER_STYLE_PATTERNS, note, re.I))
+    scores["INTENT_CORRECTION"] += 3 * len(re.findall(_REANSWER_INTENT_PATTERNS, note, re.I))
+    scores["SCOPE_CHANGE"] += 2 * len(re.findall(_REANSWER_SCOPE_PATTERNS, note, re.I))
+    scores["FACTUAL_CHALLENGE"] += 4 * len(re.findall(_REANSWER_CHALLENGE_PATTERNS, note, re.I))
+
+    target = ""
+    target_match = re.search(
+        r"(?:我问的是|我说的是|我指的是|我的意思是|其实想问|问题改成|主题改成|改成)\s*[：:]?\s*(.+)$",
+        note,
+        re.I,
+    )
+    if target_match:
+        target = target_match.group(1).strip(" 。；;，,")
+        if target and not re.search(_REANSWER_STYLE_PATTERNS, target, re.I):
+            scores["INTENT_CORRECTION"] += 3
+    if not target and len(note) <= 40 and not re.search(_REANSWER_STYLE_PATTERNS, note, re.I):
+        # The UI invites free text after "改成".  A bare domain/object phrase is
+        # much more likely to correct the intended subject than the prose style.
+        if re.search(r"模型|理论|概念|心理学|数学|物理|化学|生物|算法|方法|问题", note):
+            target = note
+            scores["INTENT_CORRECTION"] += 2
+
+    priority = ("FACTUAL_CHALLENGE", "INTENT_CORRECTION", "SCOPE_CHANGE", "STYLE_CHANGE")
+    feedback_type = max(priority, key=lambda key: (scores[key], -priority.index(key)))
+    if max(scores.values()) == 0:
+        feedback_type = "STYLE_CHANGE"
+    top = scores[feedback_type]
+    runner_up = max((value for key, value in scores.items() if key != feedback_type), default=0)
+    confidence = 0.6 if top == 0 else min(0.98, 0.68 + 0.08 * max(0, top - runner_up))
+    return {
+        "feedback_type": feedback_type,
+        "target": target,
+        "scores": scores,
+        "confidence": round(confidence, 2),
+    }
+
+
+def _revised_question_for_feedback(original_question: str, note: str, classification: dict[str, Any]) -> str:
+    feedback_type = str(classification.get("feedback_type") or "STYLE_CHANGE")
+    target = str(classification.get("target") or "").strip()
+    if feedback_type == "STYLE_CHANGE":
+        return original_question
+    if feedback_type == "INTENT_CORRECTION":
+        corrected = target or note
+        if re.search(r"[？?]$|为什么|如何|怎么|什么|是否|能否|请", corrected):
+            return corrected
+        return (
+            f"用户已经明确纠正问题对象：请解释“{corrected}”，并直接回答它的含义、核心机制和适用边界。"
+            "若术语存在多个常见流派，先给出概览再区分，不要再次要求用户选择对象类型。"
+        )
+    if feedback_type == "SCOPE_CHANGE":
+        return f"{original_question}\n\n补充范围：{note}"
+    return f"{original_question}\n\n用户质疑上一回答：{note}\n请重新核对，并给出修正后的完整回答。"
 
 
 def _agents_path(vault: Path) -> Path:
@@ -209,7 +294,29 @@ INTEREST_SEARCH_TERMS = {
     "电子电路": "electronic circuits emerging technology", "数学": "mathematics education applications",
     "AI": "artificial intelligence learning cognitive science", "心理学": "psychology recent research",
     "物理": "physics recent research applications", "摄影": "photography visual perception cognition",
+    "经济学": "economics economic policy markets", "人工智能应用": "artificial intelligence applications machine learning",
+    "社会文化史": "social cultural history", "社会与文化心理学": "social cultural psychology",
+    "认知科学": "cognitive science learning attention", "主动情境选择": "situation selection emotion regulation",
+    "计算机科学": "computer science emerging research", "电子工程": "electronic engineering emerging technology",
+    "传播学": "communication media studies", "神经网络": "neural networks deep learning",
 }
+
+
+def _frontier_search_query(direction: str) -> str:
+    if direction in INTEREST_SEARCH_TERMS:
+        return INTEREST_SEARCH_TERMS[direction]
+    keyword_routes = (
+        ("人工智能", "artificial intelligence applications machine learning"),
+        ("心理", "psychology cognition behavior"), ("认知", "cognitive science learning attention"),
+        ("经济", "economics markets policy"), ("历史", "history society culture"),
+        ("数学", "mathematics research applications"), ("物理", "physics emerging research"),
+        ("电路", "electronic circuits emerging technology"), ("电子", "electronic engineering emerging technology"),
+        ("音乐", "music cognition emotion learning"), ("诗", "poetry cognition aesthetics"),
+    )
+    for marker, query in keyword_routes:
+        if marker in direction:
+            return query
+    return f'"{direction}" research'
 
 
 def _frontier_profile(
@@ -222,6 +329,9 @@ def _frontier_profile(
     ignored_tags = {
         "教材", "课本", "概念", "知识", "前沿", "待阅读", "每日推荐", "用户确认",
         "视频解析", "字幕已解析", "B站", "raw", "source",
+        "MOC", "学科", "概念底座", "知识点", "知识分支", "学习方向", "教材归纳",
+        "待归类的新知", "跨学科探索", "园丁对话",
+        "本科入门", "本科进阶", "研究生", "入门", "进阶",
     }
     tag_counts: dict[str, int] = {}
     for note in knowledge_notes[:100]:
@@ -234,15 +344,33 @@ def _frontier_profile(
         tag for tag, _ in sorted(tag_counts.items(), key=lambda item: (-item[1], item[0]))[:4]
         if tag not in explicit and tag not in interests
     ]
-    priorities = list(dict.fromkeys([*explicit, *interests, *recent_topics]))
+    mastery = LearningMemoryService(store).overview().get("concept_mastery", [])
+    weak_concepts = [
+        str(item.get("concept_key") or "").strip()
+        for item in sorted(
+            mastery,
+            key=lambda item: (
+                float(item.get("retention", 1.0) or 0.0),
+                float(item.get("confidence", 0.0) or 0.0),
+            ),
+        )
+        if str(item.get("concept_key") or "").strip()
+        and (
+            float(item.get("retention", 1.0) or 0.0) < 0.62
+            or float(item.get("confidence", 0.0) or 0.0) < 0.62
+        )
+    ][:5]
+    priorities = list(dict.fromkeys([*explicit, *interests, *weak_concepts, *recent_topics]))
     return {
         "explicit": explicit,
         "interests": interests,
         "recent_topics": recent_topics,
+        "weak_concepts": weak_concepts,
         "priorities": priorities,
         "basis": [
             *(["你主动填写的专业/当前重点：" + "、".join(explicit)] if explicit else []),
             *(["兴趣画像：" + "、".join(interests)] if interests else []),
+            *(["需要巩固的概念：" + "、".join(weak_concepts)] if weak_concepts else []),
             *(["近期知识树主题：" + "、".join(recent_topics)] if recent_topics else []),
         ],
     }
@@ -262,7 +390,7 @@ def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
     priorities = frontier_profile["priorities"]
     knowledge_signature = "|".join(f"{note['id']}:{note['updated_at']}" for note in knowledge_notes[:80])
     profile_signature = hashlib.sha256(
-        (today + level + "|".join(priorities) + knowledge_signature).encode("utf-8")
+        ("frontier-relevance-v2|" + today + level + "|".join(priorities) + knowledge_signature).encode("utf-8")
     ).hexdigest()
     cached = store.setting(cache_key, {}) or {}
     # Never pin an empty transient failure for the whole day. Successful
@@ -281,17 +409,28 @@ def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
     if force:
         refresh_index += 1
         store.set_setting("daily_refresh_index", refresh_index)
-    offset = (date.today().toordinal() + refresh_index) % len(priorities)
-    chosen = [priorities[(offset + index) % len(priorities)] for index in range(min(2, len(priorities)))]
+    rotation = date.today().toordinal() + refresh_index
+    declared = list(dict.fromkeys([*frontier_profile["explicit"], *interests]))
+    inferred = [item for item in priorities if item not in declared]
+    chosen: list[str] = []
+    # A user's declared focus must never be displaced by noisy recent wiki tags.
+    if declared:
+        chosen.append(declared[rotation % len(declared)])
+    if inferred:
+        chosen.append(inferred[rotation % len(inferred)])
+    elif len(declared) > 1:
+        chosen.append(declared[(rotation + 1) % len(declared)])
+    if not chosen:
+        chosen = [priorities[rotation % len(priorities)]]
     articles = []
     retrieval_reports: list[dict[str, Any]] = []
     retrieval_errors: list[str] = []
     def retrieve_direction(interest: str) -> tuple[str, str, list[dict[str, Any]], dict[str, Any]]:
-        query = INTEREST_SEARCH_TERMS.get(interest, f"{interest} recent advances research")
+        query = _frontier_search_query(interest)
         diagnostics: dict[str, Any] = {}
         try:
             found = search_academic_articles(
-                query, limit=6, from_publication_date=(date.today() - timedelta(days=45)).isoformat(),
+                query, limit=6, from_publication_date=(date.today() - timedelta(days=180)).isoformat(),
                 diagnostics=diagnostics, timeout=7, attempts_per_provider=1,
             )
         except Exception as exc:
@@ -304,8 +443,20 @@ def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
 
     # Two independent subject searches run together so a degraded provider
     # cannot make the user wait through both directions sequentially.
-    with ThreadPoolExecutor(max_workers=min(2, len(chosen))) as executor:
-        direction_results = list(executor.map(retrieve_direction, chosen))
+    executor = ThreadPoolExecutor(max_workers=min(2, len(chosen)), thread_name_prefix="frontier-search")
+    future_map = {executor.submit(retrieve_direction, direction): direction for direction in chosen}
+    done, pending = wait(future_map, timeout=18)
+    direction_results = [future.result() for future in done]
+    for future in pending:
+        direction = future_map[future]
+        future.cancel()
+        query = _frontier_search_query(direction)
+        direction_results.append((direction, query, [], {
+            "interest": direction, "query": query, "provider": "", "degraded": True,
+            "errors": ["学术来源响应超过18秒，已停止等待"],
+        }))
+    # Do not make the HTTP response wait for a provider that ignored its own socket timeout.
+    executor.shutdown(wait=False, cancel_futures=True)
 
     for interest, query, found, diagnostics in direction_results:
         retrieval_reports.append(diagnostics)
@@ -329,23 +480,48 @@ def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
             break
     read_urls = set(store.setting("frontier_read_urls", []) or [])
     ranked = []
+    frontier_stopwords = {
+        "and", "the", "for", "with", "from", "into", "using", "use", "based", "key",
+        "recent", "advances", "review", "research", "study", "studies", "applications",
+        "future", "directions", "analysis", "model", "models", "method", "methods",
+        "concept", "knowledge", "source", "start", "moc", "paper", "result", "results",
+        "一个", "一种", "研究", "方法", "模型", "应用", "相关", "主要", "基于", "知识", "概念",
+    }
+
+    def meaningful_terms(value: str) -> set[str]:
+        return {
+            token.casefold() for token in tokenize(value)
+            if len(token) >= 3 and token.casefold() not in frontier_stopwords
+            and not token.isdigit()
+        }
+
     for article in articles:
         article_text = f"{article.get('title','')} {article.get('abstract','')}"
-        article_tokens = set(tokenize(article_text))
+        article_tokens = meaningful_terms(article_text)
         connections = []
         for note in knowledge_notes:
-            shared = sorted(article_tokens & set(tokenize(note["title"] + " " + note["content"][:1200])), key=len, reverse=True)
-            meaningful = [token for token in shared if len(token) >= 3]
-            if meaningful:
-                connections.append({"id": note["id"], "title": note["title"], "terms": meaningful[:3]})
-        connections = connections[:3]
+            note_tokens = meaningful_terms(note["title"] + " " + note["content"][:1200])
+            shared = sorted(article_tokens & note_tokens, key=lambda token: (-len(token), token))
+            title_terms = meaningful_terms(note["title"])
+            strong = [term for term in shared if len(term) >= 4 or term in title_terms]
+            if strong:
+                strength = min(1.0, 0.42 + 0.16 * len(strong) + (0.18 if title_terms & set(strong) else 0.0))
+                connections.append({
+                    "id": note["id"], "title": note["title"], "terms": strong[:3],
+                    "strength": round(strength, 2),
+                    "relation": "概念延伸" if title_terms & set(strong) else "共同机制",
+                    "explanation": f"论文与该知识页共同出现实质概念：{'、'.join(strong[:3])}",
+                })
+        connections = sorted(connections, key=lambda item: item["strength"], reverse=True)[:3]
+        direction_terms = meaningful_terms(INTEREST_SEARCH_TERMS.get(article["interest"], article["interest"]))
+        direction_overlap = article_tokens & direction_terms
         if article["interest"] in frontier_profile["explicit"]:
-            field_score = 1.0
+            field_score = 1.0 if direction_overlap else 0.72
         elif article["interest"] in interests:
-            field_score = 0.9
+            field_score = 0.9 if direction_overlap else 0.66
         else:
-            field_score = 0.76
-        connection_score = min(1.0, 0.35 * len(connections))
+            field_score = min(0.82, 0.5 + 0.1 * len(direction_overlap))
+        connection_score = max((float(item["strength"]) for item in connections), default=0.0)
         authority_score = min(0.95, 0.62 + min(int(article.get("cited_by_count") or 0), 100) / 500)
         freshness_score = 1.0 if int(article.get("year") or 0) >= date.today().year else 0.72
         total = 0.35 * field_score + 0.3 * connection_score + 0.2 * authority_score + 0.15 * freshness_score
@@ -357,11 +533,14 @@ def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
     items = []
     for total, article, connections, scores in ranked[:4]:
         connection_titles = [item["title"] for item in connections]
-        connection = f"它来自你选择的“{article['interest']}”垂类方向"
+        connection = f"检索方向：{article['interest']}"
         if connection_titles:
-            connection += "，并与知识树中的" + "、".join(f"《{title}》" for title in connection_titles) + "出现概念重叠"
+            connection += "。可信连接：" + "；".join(
+                f"论文中的“{'、'.join(item['terms'])}” → 《{item['title']}》（{item['relation']}）"
+                for item in connections
+            )
         else:
-            connection += "；当前属于知识树外缘的新种子，建议先判断是否值得嫁接"
+            connection += "。没有找到足够强的本地知识连接；它只是候选新种子，不宣称与你已学内容相关"
         abstract = str(article.get("abstract") or "").strip()
         sentences = [part.strip() for part in re.split(r"(?<=[。！？.!?])\s+", abstract) if part.strip()]
         preview = sentences[0][:220] if sentences else "先从标题判断研究对象、变量与可能结论。"
@@ -499,12 +678,16 @@ def answer_from_wiki(
     question: str,
     history: list[dict[str, Any]] | None = None,
     session_id: str | None = None,
+    *,
+    turn_teaching_preferences: list[str] | tuple[str, ...] | None = None,
+    on_text_delta: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Run the inspectable LangGraph gardener workflow.
 
     The legacy implementation remains in this module temporarily for rollback
     during the migration, but all normal calls now enter the graph.
     """
+    started = time.perf_counter()
     memory = LearningMemoryService(store)
     turn = memory.begin_turn(question, session_id)
     context = ContextBuilder(store).build(
@@ -513,12 +696,70 @@ def answer_from_wiki(
         session_id=turn["session_id"],
         request_id=turn["request_id"],
         message_id=turn["message_id"],
+        turn_teaching_preferences=turn_teaching_preferences,
     )
-    result = run_gardener_graph(store, context)
+    if on_text_delta is None:
+        result = run_gardener_graph(store, context)
+    else:
+        result = run_gardener_graph(store, context, on_text_delta=on_text_delta)
     persisted = memory.complete_turn(context, result)
     result["session_id"] = context.session_id
     result["request_id"] = context.request_id
     result["memory_update"] = persisted
+    result["latency_seconds"] = round(time.perf_counter() - started, 3)
+    return result
+
+
+def reanswer_with_feedback(
+    store: GardenStore,
+    *,
+    request_id: str,
+    feedback_note: str,
+    history: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Re-answer after separating teaching-style feedback from question corrections."""
+    note = feedback_note.strip()[:500]
+    if not note:
+        raise ValueError("请写下希望怎样换一种讲法")
+    memory = LearningMemoryService(store)
+    original = memory.request_turn(request_id)
+    classification = classify_reanswer_feedback(note)
+    feedback_type = classification["feedback_type"]
+    revised_question = _revised_question_for_feedback(original["question"], note, classification)
+    feedback = memory.record_personalization_feedback(
+        request_id=request_id,
+        helpful=False,
+        feedback_note=note,
+        as_teaching_preference=feedback_type == "STYLE_CHANGE",
+    )
+    persisted_history = memory.session_history(original["session_id"], limit=10)
+    clean_history = history if isinstance(history, list) and history else persisted_history
+    style_directives = None
+    if feedback_type == "STYLE_CHANGE":
+        style_directives = [
+            note
+            + "；重答必须与上一版在至少两个可观察维度上明显不同（例如讲解顺序、术语密度、例子、推导粒度或表达形式），"
+              "同时完整回答原问题，不能用说明计划或拒答代替答案。"
+        ]
+    result = answer_from_wiki(
+        store,
+        revised_question,
+        clean_history,
+        session_id=original["session_id"],
+        turn_teaching_preferences=style_directives,
+    )
+    result["reanswer"] = {
+        "original_request_id": request_id,
+        "original_question": original["question"],
+        "revised_question": revised_question,
+        "feedback_note": note,
+        "feedback_type": feedback_type,
+        "feedback_confidence": classification["confidence"],
+        "feedback_scores": classification["scores"],
+        "routing_recomputed": revised_question != original["question"],
+        "teaching_preference_applied": feedback_type == "STYLE_CHANGE",
+        "feedback_recorded": bool(feedback.get("recorded")),
+    }
     return result
 
 
@@ -526,10 +767,6 @@ def save_agent_insight(
     store: GardenStore, question: str, answer: str, citations: list[dict[str, Any]],
     web_sources: list[dict[str, Any]], followup: str = "", messages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    vault_value = store.setting("vault_path", "")
-    if not vault_value:
-        raise ValueError("请先在设置中连接 Obsidian Vault")
-    vault = Path(vault_value).expanduser().resolve()
     local_links = [f"[[{item['title']}]]" for item in citations if item.get("title")]
     source_lines = []
     for item in web_sources:
@@ -548,6 +785,55 @@ def save_agent_insight(
         f"## 下一步追问\n\n- {followup or '这个解释最需要怎样的反例来检验？'}"
     )
     title = f"{question[:54]}｜园丁探索"
+    vault_value = store.setting("vault_path", "")
+    if not vault_value:
+        digest = hashlib.sha256(
+            f"{question}\n{answer}".encode("utf-8", errors="replace")
+        ).hexdigest()[:16]
+        note = {
+            "path": f"cloud/wiki/03-交叉火花/{digest}.md",
+            "title": title,
+            "kind": "spark",
+            "content": body,
+            "tags": ["知识花园", "交叉火花", "园丁对话", "云端候选"],
+            "source": "public_garden",
+            "source_url": "",
+            "content_hash": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        }
+        note_id, _ = store.upsert_note(note)
+        store.replace_wikilinks(note_id, re.findall(r"\[\[([^\]|#]+)", body))
+        concept_title = re.sub(r"[？?]$", "", question).strip()[:54] or "本轮园丁探索"
+        if concept_title.startswith("为什么"):
+            concept_title = concept_title[3:] + "的作用机制"
+        concept_body = (
+            ">由公开测试花园中的用户确认沉淀，可在桌面版继续修订并同步到 Obsidian。\n\n"
+            f"## 当前解释\n\n{answer.strip()}\n\n"
+            f"## 推导来源\n\n- [[{title}]]\n\n"
+            "## 适用边界\n\n这是对话中形成的当前理解，不自动冒充外部事实证据。\n\n"
+            "## 主动回忆\n\n- 请不用原句重新解释，并举一个可能失效的例子。"
+        )
+        concept_digest = hashlib.sha256(concept_title.encode("utf-8")).hexdigest()[:16]
+        concept_path = f"cloud/wiki/01-概念底座/{concept_digest}.md"
+        concept_id, _ = store.upsert_note({
+            "path": concept_path,
+            "title": concept_title,
+            "kind": "concept",
+            "content": concept_body,
+            "tags": ["概念底座", "园丁对话", "云端候选"],
+            "source": "public_garden",
+            "source_url": "",
+            "content_hash": hashlib.sha256(concept_body.encode("utf-8")).hexdigest(),
+        })
+        store.replace_wikilinks(concept_id, [title])
+        store.resolve_links()
+        store.add_activity("agent_save", title, 8)
+        return {
+            "title": title, "note_id": note_id, "concept_title": concept_title,
+            "path": note["path"], "concept_path": concept_path,
+            "storage": "isolated_cloud_garden",
+            "pending_obsidian_sync": True,
+        }
+    vault = Path(vault_value).expanduser().resolve()
     output = write_wiki_asset(vault, "03-交叉火花", title, body, ["知识花园", "交叉火花", "园丁对话"])
     note = parse_markdown(output, vault)
     note_id, _ = store.upsert_note(note)

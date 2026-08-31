@@ -141,7 +141,8 @@ def export_markdown(vault_path: str | Path, folder: str, title: str, body: str, 
     vault = Path(vault_path).expanduser().resolve()
     if not vault.is_dir():
         raise ValueError("请先配置有效的 Obsidian Vault")
-    safe_title = re.sub(r'[<>:"/\\|?*]', "-", title).strip(". ")[:100] or "知识花园卡片"
+    safe_title = re.sub(r'[<>:"/\\|?*]', "-", title).strip(". ")[:100] or "致知花园卡片"
+    # Keep the historical directory name so existing Vault assets and links remain compatible.
     output_dir = vault / "知识花园" / folder
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{safe_title}.md"

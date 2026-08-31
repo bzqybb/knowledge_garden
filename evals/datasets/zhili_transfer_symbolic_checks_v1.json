@@ -1,0 +1,33 @@
+{
+  "TR-MATH-02": [
+    {"id": "independent_intersection", "target_lhs": "p_AB", "symbols": [], "rhs": "1/4"}
+  ],
+  "TR-MATH-03": [
+    {"id": "constrained_maximum", "target_lhs": "f_max", "symbols": [], "rhs": "1/2"},
+    {"id": "constrained_minimum", "target_lhs": "f_min", "symbols": [], "rhs": "-1/2"}
+  ],
+  "TR-PHYS-02": [
+    {"id": "resistor_dissipation", "target_lhs": "E_R", "symbols": ["C", "V"], "rhs": "C*V**2/2"}
+  ],
+  "TR-PHYS-03": [
+    {"id": "phase_invariant", "target_lhs": "phase_invariant", "symbols": [], "rhs": "1"}
+  ],
+  "TR-CHEM-01": [
+    {"id": "first_order_half_life", "target_lhs": "t_half", "target_aliases": ["t_{1/2}"], "symbols": ["k"], "rhs": "log(2)/k"}
+  ],
+  "TR-CHEM-02": [
+    {"id": "reversible_work", "target_lhs": "W", "symbols": ["n", "R", "T", "V1", "V2"], "rhs": "n*R*T*log(V2/V1)"}
+  ],
+  "TR-CHEM-03": [
+    {"id": "ideal_buffer_dilution", "target_lhs": "delta_pH", "target_aliases": ["Delta_pH"], "symbols": [], "rhs": "0"}
+  ],
+  "TR-BIO-01": [
+    {"id": "heterozygote_frequency", "target_lhs": "f_Aa", "symbols": ["p", "q"], "rhs": "2*p*q"}
+  ],
+  "TR-BIO-02": [
+    {"id": "holling_saturation", "target_lhs": "f_inf", "symbols": ["h"], "rhs": "1/h"}
+  ],
+  "TR-BIO-03": [
+    {"id": "pcr_efficiency_growth", "target_lhs": "N_n", "symbols": ["N0", "e", "n"], "rhs": "N0*(1+e)**n"}
+  ]
+}

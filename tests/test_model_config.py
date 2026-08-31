@@ -11,6 +11,14 @@ from core.llm import _primary_provider_options
 
 
 class ModelConfigTests(unittest.TestCase):
+    def test_closed_loop_timeout_is_configurable_and_clamped(self) -> None:
+        with patch.dict(os.environ, {"GARDEN_CLOSED_LOOP_TIMEOUT_SECONDS": "95"}, clear=False):
+            self.assertEqual(config.closed_loop_generation_timeout_seconds(), 95.0)
+        with patch.dict(os.environ, {"GARDEN_CLOSED_LOOP_TIMEOUT_SECONDS": "999"}, clear=False):
+            self.assertEqual(config.closed_loop_generation_timeout_seconds(), 300.0)
+        with patch.dict(os.environ, {"GARDEN_CLOSED_LOOP_TIMEOUT_SECONDS": "bad"}, clear=False):
+            self.assertEqual(config.closed_loop_generation_timeout_seconds(), 120.0)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -71,7 +79,10 @@ class ModelConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             _primary_provider_options(configured),
-            {"extra_body": {"thinking": {"type": "disabled"}}},
+            {"extra_body": {
+                "thinking": {"type": "disabled"},
+                "reasoning_effort": "none",
+            }},
         )
 
     def test_project_temp_and_model_caches_default_to_workspace_drive(self) -> None:

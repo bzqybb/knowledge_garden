@@ -307,6 +307,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--issues", nargs="+", default=["8129", "8128"])
     parser.add_argument("--batch-size", type=int, default=5)
+    parser.add_argument("--resume-report", type=Path)
     args = parser.parse_args()
 
     store = GardenStore()
@@ -314,6 +315,33 @@ def main() -> int:
     interests = store.setting("interests", [])
     interest_text = "、".join(str(value) for value in interests if str(value).strip()) if isinstance(interests, list) else str(interests or "")
     profile = "；".join(value for value in (focus, interest_text) if value)
+    if args.resume_report:
+        json_path = args.resume_report
+        report = json.loads(json_path.read_text(encoding="utf-8"))
+        report["_started"] = time.monotonic()
+        md_path = json_path.with_suffix(".md")
+        size = max(1, int(args.batch_size))
+        for issue in report.get("issues", []):
+            research = list(issue.get("research_items") or [])
+            failed_indexes = [
+                index for index, item in enumerate(research)
+                if not isinstance(item.get("guide"), dict) or not item["guide"].get("generated")
+            ]
+            for start in range(0, len(failed_indexes), size):
+                indexes = failed_indexes[start:start + size]
+                chunk = [research[index] for index in indexes]
+                guides = batch_guides(chunk, profile)
+                for index, guide in zip(indexes, guides):
+                    research[index]["guide"] = guide
+                save(report, json_path, md_path)
+                print(
+                    f"RETRY issue={issue.get('issue')} attempted={len(indexes)} "
+                    f"guided={sum(1 for guide in guides if guide.get('generated'))}",
+                    flush=True,
+                )
+        print(f"REPORT_JSON={json_path}", flush=True)
+        print(f"REPORT_MD={md_path}", flush=True)
+        return 0
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     json_path = RESULTS_DIR / f"nature-latest-two-{'-'.join(args.issues)}-{stamp}.json"
     md_path = json_path.with_suffix(".md")

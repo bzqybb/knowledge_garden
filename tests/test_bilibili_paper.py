@@ -5,9 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from core.bilibili_mcp import inspect_public_video, read_video, runtime_status
+from core.bilibili_mcp import _video_analysis, inspect_public_video, read_video, runtime_status
 from core.paper_reader import _connect_local_knowledge, deep_read_paper
 from core.storage import GardenStore
+from core.transcript import split_timestamped_text
 
 
 class BilibiliMCPAdapterTests(unittest.TestCase):
@@ -77,6 +78,68 @@ class BilibiliMCPAdapterTests(unittest.TestCase):
         self.assertEqual(result["data_source"], "public_subtitle")
         self.assertIn("[00:00:01 --> 00:00:04] 第一句", result["transcript"])
         self.assertIn("[00:01:05 --> 00:01:10] 第二句", result["transcript"])
+
+    def test_long_video_analysis_covers_late_timestamped_chunks(self) -> None:
+        early = "\n".join(
+            f"[00:{index // 60:02d}:{index % 60:02d} --> 00:{index // 60:02d}:{(index + 1) % 60:02d}] "
+            + "前段背景说明" * 28
+            for index in range(150)
+        )
+        late_line = "[01:20:00 --> 01:20:08] 后半段提出时间晶体机制，并说明它与普通周期驱动的区别。"
+        transcript = early + "\n" + late_line
+
+        def analyze(_: str, prompt: str, **__: object) -> dict:
+            if "后半段提出时间晶体机制" in prompt:
+                return {
+                    "overview": "后段讨论时间晶体机制。",
+                    "key_points": [{"point": "提出时间晶体机制", "evidence": late_line, "timestamp": "01:20:00"}],
+                    "concepts": ["时间晶体机制"], "caveats": [],
+                    "chapter_outline": [{"title": "时间晶体", "timestamp": "01:20:00", "summary": "后段核心"}],
+                    "questions": ["如何验证？"],
+                }
+            return {
+                "overview": "前段介绍背景。", "key_points": [], "concepts": ["背景"],
+                "caveats": [], "chapter_outline": [], "questions": [],
+            }
+
+        with patch("core.bilibili_mcp.chat_json", side_effect=analyze) as mocked:
+            result = _video_analysis("长视频", transcript, "public_subtitle")
+        self.assertGreater(mocked.call_count, 1)
+        self.assertEqual(result["coverage"]["processed_chunks"], result["coverage"]["chunks"])
+        self.assertIn("时间晶体机制", result["concepts"])
+        self.assertTrue(any(item.get("timestamp") == "01:20:00" for item in result["key_points"]))
+
+    def test_timestamp_chunking_preserves_every_line_in_order(self) -> None:
+        lines = [
+            f"[00:{index // 60:02d}:{index % 60:02d} --> 00:{(index + 1) // 60:02d}:{(index + 1) % 60:02d}] 第{index}条字幕"
+            for index in range(80)
+        ]
+        transcript = "\n".join(lines)
+        chunks = split_timestamped_text(transcript, max_chars=120)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("\n".join(chunks), transcript)
+        flattened = "\n".join(chunks)
+        for line in lines:
+            self.assertEqual(flattened.count(line), 1)
+
+    def test_video_analysis_removes_hallucinated_timestamp_evidence(self) -> None:
+        transcript = "\n".join(
+            f"[00:00:{index:02d} --> 00:00:{index + 1:02d}] 真实字幕第{index}句，讨论可验证事实。"
+            for index in range(8)
+        )
+        hallucinated = {
+            "overview": "测试导读。",
+            "key_points": [{"point": "并不存在的结论", "evidence": "伪造原文", "timestamp": "99:99:99"}],
+            "concepts": ["测试概念"], "caveats": [],
+            "chapter_outline": [{"title": "伪造章节", "timestamp": "99:99:99", "summary": "不存在"}],
+            "questions": [],
+        }
+        with patch("core.bilibili_mcp.chat_json", return_value=hallucinated):
+            result = _video_analysis("测试", transcript, "public_subtitle")
+        self.assertEqual(result["key_points"], [])
+        self.assertEqual(result["chapter_outline"], [])
+        self.assertNotIn("99:99:99", str(result["key_points"]))
+        self.assertTrue(any("无法" in item or "没有可定位" in item for item in result["caveats"]))
 
 
 class PaperDeepReadTests(unittest.TestCase):

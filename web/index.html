@@ -4,20 +4,35 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#183c2d">
-  <title>知识花园 · Knowledge Garden</title>
+  <title>致知花园 · Zhizhi Garden</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+  <div id="auth-gate" class="auth-gate" hidden>
+    <form id="auth-form" class="auth-card">
+      <div class="brand auth-brand"><span class="brand-mark">芽</span><div><strong>致知花园</strong><small>你的知识与其他用户完全隔离</small></div></div>
+      <h1>登录你的花园</h1>
+      <p id="auth-description">登录后，问题、偏好、知识库与评测授权都保存在你的独立空间。</p>
+      <label>邮箱<input id="auth-email" type="email" autocomplete="email" required></label>
+      <label>密码<input id="auth-password" type="password" minlength="10" autocomplete="current-password" required></label>
+      <div class="button-row"><button id="auth-login" class="primary" type="submit">登录</button><button id="auth-register" class="secondary" type="button">创建账号</button></div>
+      <small id="auth-hint">首次部署时，第一个账号可以直接创建；之后是否开放注册由站点配置决定。</small>
+    </form>
+  </div>
   <div class="shell">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">芽</span><div><strong>知识花园</strong><small>Knowledge Garden</small></div></div>
+      <div class="brand"><span class="brand-mark">芽</span><div><strong>致知花园</strong><small>Zhizhi Garden</small></div></div>
       <nav>
         <button class="nav active" data-view="home"><span>⌂</span> 今日花园</button>
         <button class="nav" data-view="frontier"><span>⌁</span> 前沿雷达 <i id="frontier-unread-badge" class="nav-badge" hidden>0</i></button>
-        <button class="nav" data-view="garden"><span>✣</span> 知识树</button>
         <button class="nav" data-view="capture"><span>✎</span> 灵感温室</button>
-        <button class="nav" data-view="wechat"><span aria-hidden="true">✉</span> 微信苗圃</button>
-        <button class="nav" data-view="settings"><span>⚙</span> 设置</button>
+        <button class="nav" data-view="garden"><span>✣</span> 学科思维导图</button>
+        <button class="nav nav-more" id="nav-more" type="button" aria-expanded="false"><span>•••</span> 更多工具</button>
+        <div class="nav-tools" id="nav-tools" hidden>
+          <button class="nav" data-view="growth"><span>⇈</span> 我的成长</button>
+          <button class="nav" data-view="wechat"><span aria-hidden="true">✉</span> 微信苗圃</button>
+          <button class="nav" data-view="settings"><span>⚙</span> 设置</button>
+        </div>
       </nav>
       <div class="side-card">
         <div class="tiny-label">花园等级</div>
@@ -31,10 +46,24 @@
     <main>
       <header class="topbar">
         <div><p class="eyebrow" id="today-label">KNOWLEDGE IN BLOOM</p><h1 id="page-title">早上好，园丁</h1></div>
-        <div class="header-actions"><span class="privacy">◉ 本地优先</span><button class="icon-btn" id="refresh-all" title="刷新">↻</button></div>
+        <div class="header-actions"><span class="privacy">◉ 私有花园</span><span id="auth-user" class="auth-user" hidden></span><button id="auth-logout" class="text-btn" type="button" hidden>退出</button><button class="icon-btn" id="refresh-all" title="刷新">↻</button></div>
       </header>
 
       <section class="view active" id="view-home">
+        <article id="public-experience" class="panel public-experience" hidden>
+          <div>
+            <span class="kicker">PUBLIC TEST GARDEN</span>
+            <h3>这不只是一个问答页</h3>
+            <p>公开版可完整体验材料导读、灵感探索、知识沉淀、个人思维导图、复习与成长记录；每个账号的数据相互隔离。</p>
+          </div>
+          <div class="public-capabilities">
+            <button class="secondary" data-go="frontier" type="button">粘贴材料做导读</button>
+            <button class="secondary" data-go="capture" type="button">展开灵感讨论</button>
+            <button class="secondary" data-go="garden" type="button">查看知识树</button>
+            <button class="secondary" data-go="growth" type="button">查看学习成长</button>
+          </div>
+          <small>需要用户电脑的微信、Obsidian、本地教材/OCR 与 B 站 ASR 仅在桌面版开放，公开网站不会读取服务器本机资料。</small>
+        </article>
         <div class="hero">
           <div class="hero-copy"><span class="season">本周生长建议</span><h2 id="hero-title">让一条新知识<br>在旧土壤里扎根</h2><p id="hero-text">先同步你的 Obsidian，知识园丁会从已有笔记里发现可以继续生长的方向。</p><button class="primary" data-go="frontier">种下一颗前沿种子 <span>→</span></button></div>
           <div class="plant-art" aria-hidden="true"><div class="sun"></div><div class="leaf l1"></div><div class="leaf l2"></div><div class="leaf l3"></div><div class="leaf l4"></div><div class="stem"></div><div class="pot"><span></span></div></div>
@@ -64,19 +93,18 @@
           <article class="panel report-panel"><div class="panel-head"><div><span class="kicker">WEEKLY LETTER</span><h3 id="report-title">学习周报</h3></div><span class="stamp">Garden<br>Post</span></div><blockquote id="report-insight">你的花园正在准备发芽。</blockquote><div id="report-concepts" class="chips"></div><div class="report-foot"><span id="report-done">本周完成 0 项</span><button class="text-btn" id="copy-report">复制周报</button></div></article>
         </div>
 
-        <article class="panel cards-panel"><div class="panel-head"><div><span class="kicker">NEW BLOOMS</span><h3>最近绽放的对照卡</h3></div><button class="text-btn" data-go="frontier">生成新卡片 →</button></div><div id="recent-cards" class="card-row"></div></article>
         <aside id="frontier-alert" class="frontier-alert" hidden><div><span>NEW FRONTIER</span><b id="frontier-alert-title">发现新的专业前沿</b><small id="frontier-alert-detail"></small></div><div><button id="frontier-notify" class="text-btn" type="button">开启桌面提醒</button><button class="secondary" data-go="frontier" type="button">查看前沿雷达</button></div></aside>
         <article class="panel daily-panel"><div class="panel-head"><div><span class="kicker">DAILY GARDEN POST</span><h3>根据你的专业、需求与近期学习巡视</h3><small id="daily-profile">正在读取专业方向、兴趣与知识树……</small></div><button class="text-btn" id="refresh-daily">换一批 →</button></div><div id="daily-digest" class="daily-grid"><div class="empty">园丁正在准备今天的知识推送。</div></div></article>
       </section>
 
       <section class="view" id="view-frontier">
-        <div class="section-intro"><div><span class="kicker">FRONTIER RADAR</span><h2>把时代的新枝，嫁接到教材的根上</h2><p>粘贴博主解读、论文摘要或课程外材料。园丁会按你的水平提炼概念，并生成教材—前沿对照卡。</p></div></div>
+        <div class="section-intro"><div><span class="kicker">FRONTIER RADAR</span><h2>把时代的新枝，嫁接到教材的根上</h2><p>粘贴文章、论文摘要或视频字幕。GLM 会分段通读，生成带原文证据的结构化导读。</p></div></div>
         <div class="two-col">
           <form class="panel form-panel" id="analyze-form">
             <label>材料标题<input id="frontier-title" placeholder="例如：为什么 Transformer 需要注意力机制" required></label>
             <label>来源链接（可选）<input id="frontier-url" type="url" placeholder="https://..."></label>
             <label>摘要或正文<textarea id="frontier-text" rows="11" placeholder="粘贴你想真正读懂的内容……" required></textarea></label>
-            <button class="primary wide" type="submit">提炼概念并生成对照卡 <span>✦</span></button>
+            <button class="primary wide" type="submit">生成 GLM 深度导读 <span>✦</span></button>
           </form>
           <div>
             <article class="panel feed-panel"><div class="panel-head"><div><span class="kicker">FOLLOWING</span><h3>博主追踪</h3></div><button id="refresh-feeds" class="text-btn">刷新全部</button></div><form id="feed-form" class="inline-form"><input id="feed-name" placeholder="博主名称" required><input id="feed-url" type="url" placeholder="B站主页 / 博客 / RSS" required><button>＋</button></form><p class="feed-help">支持 B 站 UP 主、YouTube、GitHub、Substack、Medium 与 RSS / Atom。</p><div id="bilibili-mcp-status" class="source-notice compact-notice">正在检查 Bilibili MCP 字幕能力……</div><div id="feed-list" class="feed-list"></div></article>
@@ -86,10 +114,25 @@
         <div id="analysis-result" class="analysis-result"></div>
       </section>
 
+      <section class="view" id="view-growth">
+        <div class="section-intro"><div><span class="kicker">LONGITUDINAL LEARNING</span><h2>不只记住你说过什么，还要看见你如何生长</h2><p>这里只展示有证据的学习记忆。一次表现不会变成永久标签；稳定偏好必须由明确设置或跨会话重复证据支持。</p></div><div class="growth-actions"><button class="primary" data-go="garden" type="button">查看学科思维导图</button><button id="refresh-growth" class="secondary" type="button">刷新成长档案</button></div></div>
+        <div class="metrics growth-metrics">
+          <article><span class="metric-icon green">·</span><div><small>学习事件</small><strong id="growth-events">0</strong></div><em>L1 原始经历</em></article>
+          <article><span class="metric-icon gold">≈</span><div><small>有效记忆</small><strong id="growth-claims">0</strong></div><em>L2/L3 证据假设</em></article>
+          <article><span class="metric-icon blue">✓</span><div><small>跟踪概念</small><strong id="growth-mastery">0</strong></div><em>随复习动态变化</em></article>
+          <article><span class="metric-icon coral">⌛</span><div><small>待复习</small><strong id="growth-due">0</strong></div><em>按遗忘曲线估算</em></article>
+        </div>
+        <div class="two-col lower">
+          <article class="panel"><div class="panel-head"><div><span class="kicker">MASTERY</span><h3>概念掌握度</h3></div></div><div id="growth-mastery-list" class="task-list"><div class="empty">还没有可追溯的复习记录。</div></div></article>
+          <article class="panel"><div class="panel-head"><div><span class="kicker">MEMORY GRAPH</span><h3>稳定学习模式</h3></div></div><div id="growth-pattern-list" class="stack-cards"><div class="empty">还没有跨会话稳定模式，这比过早给你贴标签更安全。</div></div></article>
+        </div>
+        <article class="panel"><div class="panel-head"><div><span class="kicker">AUDITABLE MEMORY</span><h3>记忆是怎样形成的</h3></div></div><div id="growth-claim-list" class="source-list"><div class="empty">随着对话、复习和反馈，这里会显示可修正的记忆假设。</div></div></article>
+      </section>
+
       <section class="view" id="view-garden">
-        <div class="section-intro graph-intro"><div><span class="kicker">YOUR CROSS-DISCIPLINARY MIND MAP</span><h2>我的知识花园：从学科底层向外生长</h2><p>统一结构为“学科 → 分支 → 方向 → 已学知识点”。问题、任务、讲义名和页码不进入主图；候选跨学科联系由你决定是否显示。</p></div><div class="map-controls"><label><input id="show-cross-links" type="checkbox"> 显示候选虚线</label><button id="rebuild-links" class="secondary" title="你主动点击后，园丁会使用已连接的理解 API 复核概念角色、父子层级和跨域关系">重新整理结构与连接</button></div></div>
+        <div class="section-intro graph-intro"><div><span class="kicker">YOUR CROSS-DISCIPLINARY MIND MAP</span><h2>我的知识花园：从学科底层向外生长</h2><p>统一结构为“学科 → 分支 → 方向 → 已学知识点”。问题、任务、讲义名和页码不进入主图；候选跨学科联系由你决定是否显示。</p></div><div class="map-controls"><label><input id="show-cross-links" type="checkbox"> 显示候选虚线</label><div class="map-fold-actions"><button id="collapse-mindmap" class="secondary" type="button">只看学科</button><button id="expand-mindmap" class="secondary" type="button">全部展开</button></div><button id="rebuild-links" class="secondary" title="你主动点击后，园丁会使用已连接的理解 API 复核概念角色、父子层级和跨域关系">重新整理结构与连接</button></div></div>
         <article class="panel graph-panel"><div class="legend"><span>中心：我的知识花园</span><span>粗枝：学科</span><span>细枝：分支与方向</span><span>叶片：已学知识点</span><span>实线跨域：已确认</span><span>┄ 虚线：待确认</span></div><svg id="knowledge-graph" role="img" aria-label="跨学科知识思维导图"></svg><div id="node-detail" class="node-detail">点击知识点，查看你学到的内容和来源依据。</div></article>
-        <div class="two-col lower"><article class="panel"><div class="panel-head"><div><span class="kicker">REVIEW</span><h3>复习任务</h3></div></div><div id="all-tasks" class="task-list"></div></article><article class="panel"><div class="panel-head"><div><span class="kicker">BRIDGE CARDS</span><h3>教材—前沿卡片</h3></div></div><div id="all-cards" class="stack-cards"></div></article></div>
+        <div class="lower"><article class="panel"><div class="panel-head"><div><span class="kicker">REVIEW</span><h3>复习任务</h3></div></div><div id="all-tasks" class="task-list"></div></article></div>
       </section>
 
       <section class="view" id="view-capture">
@@ -148,12 +191,14 @@
         <div class="settings-grid">
           <form class="panel form-panel" id="settings-form"><h3>Obsidian 与学习画像</h3><label>Vault 文件夹路径<input id="vault-path" placeholder="D:\Notes\MyVault"></label><label>当前知识水平<select id="learning-level"><option>高中基础</option><option selected>本科入门</option><option>本科进阶</option><option>研究生</option><option>领域从业者</option></select></label><label>专业 / 当前重点方向<textarea id="frontier-focus" rows="2" placeholder="例如：材料物理、机器学习；会优先于泛兴趣用于前沿选题"></textarea></label><label>兴趣关键词<textarea id="interests" rows="3" placeholder="摄影、科幻、音乐、城市漫游……"></textarea></label><button class="primary wide" type="submit">保存并同步 Obsidian</button></form>
           <div class="tool-stack">
+            <article id="desktop-companion-card" class="panel desktop-companion" hidden><div class="tool-icon">▣</div><div><h3>连接你的电脑</h3><p>公开网站不会读取服务器本机的微信或 Obsidian。桌面 App 的一个安装包已包含 TraceMemo、B站解析运行时和自动更新，不需要再下载插件；向导只会要求你完成账号与数据授权。</p><small>本机资料只传输你主动选择的片段；网站不能远程执行任意本机代码。</small></div><a id="desktop-download" class="primary" href="#">下载 Windows App</a></article>
             <article class="panel tool-card textbook-tool"><div class="tool-icon">▤</div><div><h3>教材总目录</h3><p>递归发现目录下所有 PDF；扫描版自动使用 Windows 本地中文 OCR，支持后台识别和断点续扫。</p><input id="textbook-directory" placeholder="例如 D:\教材（可包含多层子文件夹）"><small id="textbook-ocr-status">正在检查本地扫描教材识别状态……</small></div><button id="import-textbooks" class="secondary">增量扫描</button></article>
             <article class="panel raw-tool"><div><h3>编译 Raw 资料</h3><p>按 AGENTS.md 规则生成概念底座、降维对照、双向链接与主题 MOC。</p></div><div class="raw-row"><input id="raw-file" placeholder="raw/2026-08-21-example.md"><button id="ingest-raw" class="secondary">执行 Ingest</button></div><small id="link-health">链接闭合状态将在编译后显示</small></article>
             <article class="panel tool-card"><div class="tool-icon">芽</div><div><h3>知识园丁主动巡视</h3><p>扫描 raw 更新，补全知识页、主题索引和 AGENTS.md 来源清单。</p></div><button id="agent-patrol" class="secondary">立即巡视</button></article>
             <article class="panel tool-card"><div class="tool-icon">AI</div><div><h3>个性化讲解</h3><p id="llm-status">正在检测大模型配置……</p></div><span id="llm-badge" class="status-badge">检测中</span></article>
+            <article class="panel improvement-consent"><div><h3>帮助园丁持续改进</h3><p>关闭时，问题只留在你的私有花园。开启后，问题和回答会先脱敏，再进入候选评测池；固定保留集不会用于优化。</p><small id="improvement-status">尚未授权贡献评测样例。</small></div><label class="consent-switch"><input id="improvement-consent" type="checkbox"><span>同意贡献脱敏样例</span></label></article>
             <article class="panel tool-card"><div class="tool-icon" aria-hidden="true">✉</div><div><h3>微信本地通道</h3><p id="wechat-settings-status">TraceMemo 尚未连接。</p></div><button class="secondary" data-go="wechat">打开微信苗圃</button></article>
-            <article class="panel safety"><b>隐私约定</b><p>API Key 运行时只进入服务内存；也可由 Windows DPAPI 加密保存在本机。它不会出现在网页、数据库或 Obsidian 笔记中。默认仅本机可访问。</p></article>
+            <article class="panel safety"><b>隐私约定</b><p id="privacy-policy-copy">公开公测的模型 Key 只保存在服务器，用户无法读取。桌面端仅用 Windows DPAPI 保存自己的登录令牌；本地数据库、微信与 Obsidian 不会被整库上传，只有你主动用于回答的材料片段会发送给模型服务。</p></article>
           </div>
         </div>
       </section>
@@ -206,6 +251,8 @@
   </div>
   <div id="toast" class="toast"></div>
   <div id="busy" class="busy"><div class="loader"><i></i><span>知识园丁正在松土……</span></div></div>
+  <script>window.MathJax={tex:{inlineMath:[["$","$"],["\\(","\\)"]],displayMath:[["$$","$$"],["\\[","\\]"]]},options:{skipHtmlTags:["script","noscript","style","textarea","pre","code"]}};</script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" onload="window.dispatchEvent(new Event('mathjax-ready'))"></script>
   <script src="/app.js"></script>
 </body>
 </html>

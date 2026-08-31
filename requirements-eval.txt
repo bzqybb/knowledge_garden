@@ -1,3 +1,4 @@
+-r requirements.txt
 ragas==0.4.3
 openai==2.45.0
 instructor==1.15.4

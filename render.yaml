@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: knowledge-garden
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/auth/status
+    envVars:
+      - key: GARDEN_AUTH_REQUIRED
+        value: "true"
+      - key: GARDEN_ALLOW_SIGNUP
+        value: "false"
+      - key: GARDEN_COOKIE_SECURE
+        value: "true"
+      - key: GARDEN_DATA_DIR
+        value: /var/data
+      - key: GARDEN_API_KEY
+        sync: false
+      - key: GARDEN_BASE_URL
+        sync: false
+      - key: GARDEN_MODEL
+        sync: false
+      - key: GARDEN_RELEASE_VERSION
+        value: public-v1
+    disk:
+      name: knowledge-garden-data
+      mountPath: /var/data
+      sizeGB: 1

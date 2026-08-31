@@ -1,6 +1,15 @@
-# 知识花园智能体
+# 致知花园智能体
 
 一个以 Obsidian 为长期记忆、兼顾专业学习和兴趣探索的本地优先知识智能体。它会把教材、课程笔记、关注源更新和随手收藏连接成可复习、可追问、可生长的知识网络。
+
+## 产品能力契约
+
+致知花园不试图用复杂 Agent 流程重写每一道普通问题。它遵守两条回答通道：
+
+- **GLM-5.2 直答**：稳定知识和普通问答直接使用主模型，只执行用户明确设置的讲解偏好，不让额外流程降低基础回答能力。
+- **知识花园增强**：涉及个人笔记、长期记忆、复习、知识写回、时效事实、来源核验或高风险内容时，才启动可审计的检索、记忆和证据流程。
+
+界面在每次回答上标明实际通道。左侧“我的成长”展示 L1 学习事件、L2/L3 经验记忆、概念掌握度和待复习状态；左侧“知识树”展示资料与概念的可生长网络。两者分开，避免把“资料存在”误当成“用户已掌握”。
 
 ## Agent 的地位
 
@@ -97,10 +106,19 @@ Token 也可临时通过 `TRACEMEMO_API_TOKEN` 环境变量提供，地址可由
 需要 Python 3.10 以上。项目使用 LangChain 1.x 组织提示词、OpenAI-compatible 模型与结构化输出链。
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\bootstrap.cmd
 .\.venv\Scripts\python.exe app.py
 ```
+
+`bootstrap.cmd` 会绕过 Windows 默认的 PowerShell 脚本执行策略并调用 `bootstrap.ps1`：创建或验证 `.venv`、安装核心与评测依赖、执行 `pip check`，并运行完整测试集。若从别的电脑复制来的 `.venv` 无法启动，执行 `.\bootstrap.cmd -Rebuild`；旧环境会移动到带时间戳的备份目录，不会直接删除。只想准备运行环境时可加 `-SkipTests`，需要本地向量模型时加 `-WithVector`。
+
+比赛现场需要验证离线降级时，可运行：
+
+```powershell
+.\run_offline_demo.cmd
+```
+
+该入口只对当前进程禁用网络与已保存模型密钥，不会删除配置。Obsidian、本地 Wiki、历史数据和无需模型的功能仍可使用；依赖远程模型的闭环推导会明确返回 `generation_failed` 降级结果，不会伪造证据或把网络故障解释成知识性拒答。
 
 浏览器打开 <http://127.0.0.1:8765>。首次使用依次完成：
 
@@ -135,7 +153,7 @@ tags: [线性代数, 教材]
 
 ## 启用个性化大模型讲解
 
-如果已通过 `首次配置GLM问题理解.cmd` 配置智谱 GLM，知识花园会自动复用这份 Windows DPAPI 加密密钥，同时用于问题理解和教材问答；默认模型为 `glm-4.5-airx`，不需要再次输入 Key。原有 Kimi 评测密钥仍然独立，仅用于评测裁判。显式设置 `GARDEN_BASE_URL`、`GARDEN_MODEL` 和对应密钥时，仍可以切换回其他 OpenAI-compatible 服务。
+双击 `启动知识花园.cmd` 时，当前正式配置使用并行科技 OpenAI-compatible 网关：`GLM-4.5-AirX` 负责问题理解与结构化规划，`GLM-5.2` 负责最终回答。两者的密钥用 Windows DPAPI 加密保存，不写入 README、源码或前端。原有 Kimi 等评测密钥仍然独立，仅用于指定评测。显式设置 `GARDEN_BASE_URL`、`GARDEN_MODEL` 和对应密钥时，仍可以切换到其他 OpenAI-compatible 服务，无需修改业务提示词。
 
 推荐使用“一次输入、以后自动连接”的 Windows 安全保存方式。第一次运行：
 
@@ -193,8 +211,11 @@ python app.py
 ## 测试
 
 ```powershell
-python -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m pip install -r requirements-eval.txt
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
+
+截至 2026-08-28，当前仓库在项目 `.venv` 中实际发现并通过 355 项 `unittest`。该数字会随新增测试变化，应以命令末尾的 `Ran N tests` 为准，不能用历史报告代替本机执行结果。
 ## Obsidian Wiki 编译工作流补充
 
 基于 `AGENTS.md` 规则驱动的离线/在线自适应知识编译系统。智能体（Agent）负责将 `raw/` 目录中的原始碎片资料（论文、笔记、思考）自动解构、提炼，并编译为互联的 `wiki/` 数字花园网络，同时提供克制的苏格拉底式启发引导。

@@ -15,13 +15,23 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from core.config import ROOT
+from core.config import DATA_DIR, ROOT
 from core.llm import LLMError, chat_json
 from core.storage import GardenStore
+from core.transcript import TIMESTAMP_LINE_RE, split_timestamped_text
 
 
 PROJECT_ROOT = ROOT
-MCP_HOME = PROJECT_ROOT / "vendor" / "bilibili-home"
+_configured_mcp_home = os.getenv("GARDEN_BILIBILI_HOME", "").strip()
+_legacy_mcp_home = PROJECT_ROOT / "vendor" / "bilibili-home"
+if _configured_mcp_home:
+    MCP_HOME = Path(_configured_mcp_home).expanduser().resolve()
+elif not os.getenv("GARDEN_DATA_DIR", "").strip() and (_legacy_mcp_home / ".bilibili-mcp").is_dir():
+    # Preserve existing developer logins. Packaged desktop processes always set
+    # GARDEN_DATA_DIR, so their credentials live in durable per-user AppData.
+    MCP_HOME = _legacy_mcp_home
+else:
+    MCP_HOME = DATA_DIR / "bilibili-home"
 _BVID = re.compile(r"(?:video/)?(BV[0-9A-Za-z]{10,})", re.IGNORECASE)
 _BROWSER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -152,6 +162,10 @@ def _find_node() -> Path | None:
 def _find_package_file(relative: str) -> Path | None:
     configured = os.getenv("GARDEN_BILIBILI_MCP_ROOT", "").strip()
     roots: list[Path] = [Path(configured)] if configured else []
+    roots.append(
+        PROJECT_ROOT / "vendor" / "bilibili-runtime" / "node_modules"
+        / "@xzxzzx" / "bilibili-mcp"
+    )
     roots.extend(
         path.parent
         for path in (PROJECT_ROOT / "vendor" / "pnpm-store").glob(
@@ -354,23 +368,160 @@ def _video_analysis(title: str, transcript: str, data_source: str) -> dict[str, 
     }
     if len(re.sub(r"\s+", "", transcript)) < 120:
         return fallback
-    try:
-        result = chat_json(
-            "你是严谨的视频学术导读编辑。只根据提供的字幕/ASR转录分析，不把UP主观点自动当作事实。只返回JSON。关键点必须保留对应时间戳或短原话；无法从转录确认时明确写入caveats。",
-            f"标题：{title}\n转录来源：{data_source}\n转录：\n{transcript[:28000]}\n\n"
-            "返回 overview（2~4句）、key_points（3~7项，每项含 point、evidence、timestamp）、concepts、"
-            "chapter_outline（每项含 title、timestamp、summary）、caveats、questions（2~4项）。",
-            timeout=75,
-            max_retries=1,
-        )
-    except LLMError:
-        result = None
-    if not isinstance(result, dict):
-        return fallback
-    return {
-        key: result.get(key, fallback[key])
-        for key in fallback
+    chunks = split_timestamped_text(transcript, max_chars=24000) or [transcript]
+    partials: list[dict[str, Any]] = []
+    failed_chunks = 0
+    generation_errors: list[str] = []
+    for index, chunk in enumerate(chunks):
+        try:
+            result = chat_json(
+                "你是严谨的视频学术导读编辑。只根据提供的字幕/ASR转录分析，不把UP主观点自动当作事实。只返回JSON。关键点必须保留对应时间戳和短原话；无法从转录确认时明确写入caveats。当前输入是完整视频按时间顺序切分的一块，不得假装看过其他块。",
+                f"标题：{title}\n转录来源：{data_source}\n全文分块：{index + 1}/{len(chunks)}\n"
+                f"本块转录：\n{chunk}\n\n"
+                "返回 overview（1~3句）、key_points（1~7项，每项含 point、evidence、timestamp）、concepts、"
+                "chapter_outline（每项含 title、timestamp、summary）、caveats、questions（1~4项）。"
+                "key_points 中每一项只能包含一个原子主张；evidence 必须复制连续 2~5 行字幕原话并足以支持整个 point，"
+                "timestamp 填这段证据第一行的开始时间。concepts 只保留可迁移的机制或方法概念，排除片名、人名、品牌名、"
+                "普通英文词和孤立专有名词。",
+                timeout=75,
+                max_retries=1,
+            )
+        except LLMError as exc:
+            generation_errors.append(str(exc))
+            result = None
+        if isinstance(result, dict):
+            partials.append({key: result.get(key, fallback[key]) for key in fallback})
+        else:
+            failed_chunks += 1
+    if not partials:
+        return {
+            **fallback,
+            "generation_failed": True,
+            "generation_error": generation_errors[0] if generation_errors else "GLM 深度导读没有返回可解析结果",
+            "coverage": {"chunks": len(chunks), "processed_chunks": 0, "failed_chunks": failed_chunks},
+        }
+
+    def unique_items(values: list[Any]) -> list[Any]:
+        output: list[Any] = []
+        seen: set[str] = set()
+        for value in values:
+            marker = json.dumps(value, ensure_ascii=False, sort_keys=True) if isinstance(value, (dict, list)) else str(value)
+            if marker and marker not in seen:
+                seen.add(marker)
+                output.append(value)
+        return output
+
+    overviews = unique_items([str(item.get("overview") or "").strip() for item in partials])
+    merged = {
+        "overview": " ".join(item for item in overviews if item),
+        "key_points": unique_items([value for item in partials for value in (item.get("key_points") or [])]),
+        "concepts": unique_items([value for item in partials for value in (item.get("concepts") or [])]),
+        "caveats": unique_items([value for item in partials for value in (item.get("caveats") or [])]),
+        "chapter_outline": unique_items([value for item in partials for value in (item.get("chapter_outline") or [])]),
+        "questions": unique_items([value for item in partials for value in (item.get("questions") or [])]),
+        "coverage": {
+            "chunks": len(chunks), "processed_chunks": len(partials), "failed_chunks": failed_chunks,
+        },
+        "generation_failed": False,
+        "generation_error": "",
     }
+    if failed_chunks:
+        merged["caveats"].append(f"共有 {failed_chunks}/{len(chunks)} 个字幕分块导读生成失败；完整原字幕仍保留在下方，可据时间戳核对。")
+    transcript_lines = [line.strip() for line in transcript.splitlines() if TIMESTAMP_LINE_RE.match(line)]
+
+    def timestamp_seconds(value: str) -> int | None:
+        match = re.search(r"(\d{2}):(\d{2}):(\d{2})", value)
+        if not match:
+            return None
+        hours, minutes, seconds = (int(part) for part in match.groups())
+        return hours * 3600 + minutes * 60 + seconds
+
+    def evidence_window(timestamp: str, radius: int = 15) -> str:
+        target = timestamp_seconds(timestamp)
+        if target is None:
+            return ""
+        selected: list[str] = []
+        for line in transcript_lines:
+            match = TIMESTAMP_LINE_RE.match(line)
+            start = timestamp_seconds(match.group("start")) if match else None
+            if start is not None and target - radius <= start <= target + radius:
+                selected.append(line)
+        return "\n".join(selected[:12])
+    grounded_points: list[Any] = []
+    for item in merged["key_points"]:
+        if not isinstance(item, dict):
+            if str(item).strip() and str(item).strip() in transcript:
+                grounded_points.append(item)
+            else:
+                merged["caveats"].append(f"导读关键点“{str(item)[:80]}”未能定位到原字幕，已从证据列表移除。")
+            continue
+        point = str(item.get("point") or item.get("summary") or "").strip()
+        evidence = str(item.get("evidence") or "").strip().strip('“”"')
+        timestamp = str(item.get("timestamp") or "").strip().strip("[]")
+        compact_evidence = re.sub(r"\s+", "", evidence)
+        source_compact = re.sub(r"\s+", "", transcript)
+        grounded_line = ""
+        if timestamp:
+            grounded_line = evidence_window(timestamp)
+        elif compact_evidence and compact_evidence in source_compact:
+            grounded_line = evidence
+        elif point:
+            grounded_line = next((line for line in transcript_lines if point in line), "")
+        if grounded_line:
+            grounded = dict(item)
+            grounded["evidence"] = grounded_line
+            if not timestamp:
+                match = TIMESTAMP_LINE_RE.match(grounded_line)
+                if match:
+                    grounded["timestamp"] = match.group("start")
+            grounded_points.append(grounded)
+        else:
+            merged["caveats"].append(f"导读关键点“{point[:80] or '未命名关键点'}”没有可定位的字幕证据，已从关键点列表移除。")
+    merged["key_points"] = grounded_points
+    grounded_chapters: list[Any] = []
+    for item in merged["chapter_outline"]:
+        if not isinstance(item, dict):
+            continue
+        timestamp = str(item.get("timestamp") or "").strip().strip("[]")
+        if not timestamp or any(timestamp in line for line in transcript_lines):
+            grounded_chapters.append(item)
+        else:
+            merged["caveats"].append(f"章节“{str(item.get('title') or '')[:80]}”的时间戳无法在原字幕定位，已移除该章节。")
+    merged["chapter_outline"] = grounded_chapters
+    return merged
+
+
+def _analysis_markdown(analysis: dict[str, Any]) -> str:
+    lines = ["## 导读摘要"]
+    if analysis.get("generation_failed"):
+        lines.extend([
+            "> GLM 深度导读失败；字幕已经完整保存，但下面的占位内容不算导读结果。",
+            f"> 原因：{analysis.get('generation_error') or '模型没有返回可解析结果'}",
+            "",
+        ])
+    lines.append(str(analysis.get("overview") or ""))
+    sections = [
+        ("关键点与证据", analysis.get("key_points") or []),
+        ("章节导览", analysis.get("chapter_outline") or []),
+        ("核心概念", analysis.get("concepts") or []),
+        ("核对提醒", analysis.get("caveats") or []),
+        ("继续思考", analysis.get("questions") or []),
+    ]
+    for heading, items in sections:
+        if not items:
+            continue
+        lines.extend(["", f"### {heading}"])
+        for item in items:
+            if isinstance(item, dict):
+                timestamp = str(item.get("timestamp") or "").strip()
+                title = str(item.get("point") or item.get("title") or item.get("name") or "").strip()
+                summary = str(item.get("summary") or "").strip()
+                evidence = str(item.get("evidence") or "").strip()
+                detail = title + (f"：{summary}" if summary else "") + (f"；原文：{evidence}" if evidence else "")
+                lines.append(f"- {'[' + timestamp + '] ' if timestamp else ''}{detail}")
+            else:
+                lines.append(f"- {item}")
+    return "\n".join(lines).strip()
 
 
 def read_video(
@@ -424,7 +575,7 @@ def read_video(
     content = "\n\n".join([
         f"> 视频来源：{source_url}",
         f"> 内容依据：{data_source}；AI字幕和ASR都可能识别错误，关键表述应回到时间戳核对。",
-        "## 导读摘要\n" + str(analysis.get("overview") or ""),
+        _analysis_markdown(analysis),
         "## 带时间戳的转录\n" + (transcript_text or "未取得可用字幕。"),
     ])
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -446,6 +597,8 @@ def read_video(
         "data_source": data_source,
         "transcript": transcript_text,
         "analysis": analysis,
+        "analysis_generation_failed": bool(analysis.get("generation_failed")),
+        "analysis_generation_error": str(analysis.get("generation_error") or ""),
         "metadata": metadata,
         "note_id": note_id,
         "asr_used": data_source == "asr",

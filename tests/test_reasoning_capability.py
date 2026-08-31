@@ -12,10 +12,12 @@ from core.learning_memory import LearningMemoryService
 from core.reasoning_capability import (
     CATEGORY_ALIASES,
     classify_reasoning_task,
+    evidence_route,
     is_self_contained_reasoning,
     reasoning_subject,
     reasoning_prompt,
     review_reasoning_answer,
+    science_precision_instruction,
 )
 from core.storage import GardenStore
 from evals.adapter import load_cases
@@ -24,9 +26,44 @@ from evals.general_reasoning_benchmark import summarize, validate_dataset
 
 ROOT = Path(__file__).resolve().parent.parent
 DATASET = ROOT / "evals" / "datasets" / "general_reasoning_15_v1.jsonl"
+BLIND_DATASET = ROOT / "evals" / "datasets" / "zhili_blind_20_v1.jsonl"
 
 
 class ReasoningCapabilityTests(unittest.TestCase):
+    def test_science_precision_guards_cover_independently_verified_defects(self):
+        group = science_precision_instruction("验证有限群与同态图像的第一同构定理，并讨论群的阶数。")
+        hyperbolic = science_precision_instruction("推导双曲面测地线并编写数值积分器。")
+        tau = science_precision_instruction("计算 Ramanujan tau 函数 Fourier 系数并验证乘性。")
+        tsp = science_precision_instruction("实现 Christofides 旅行商 1.5 近似算法。")
+        self.assertIn("同阶群必同构", group)
+        self.assertIn("Lorentz/Minkowski", hyperbolic)
+        self.assertIn("最短分支", hyperbolic)
+        self.assertIn("arcosh", hyperbolic)
+        self.assertIn("max(mn)", tau)
+        self.assertIn("tour.append(tour)", tsp)
+
+    def test_ordinary_knowledge_question_allows_direct_model_answer(self):
+        profile = classify_reasoning_task("为什么跨文化问卷分数不能直接比较？")
+        route = evidence_route("为什么跨文化问卷分数不能直接比较？", profile=profile)
+        self.assertEqual(route["routing_target"], "MODEL_KNOWLEDGE_ALLOWED")
+        self.assertFalse(route["search_enabled"])
+
+    def test_domain_term_containing_lookup_word_is_not_search_request(self):
+        question = "错误回答：‘哈希查找是 O(1)，所以不会变慢。’请诊断。"
+        profile = classify_reasoning_task(question)
+        route = evidence_route(question, profile=profile)
+        self.assertEqual(route["routing_target"], "MUST_NOT_SEARCH")
+        self.assertFalse(route["matched_external_signals"])
+
+    def test_all_held_out_self_contained_questions_prune_external_search(self):
+        failures = []
+        for case in load_cases(BLIND_DATASET):
+            profile = classify_reasoning_task(case["question"])
+            route = evidence_route(case["question"], profile=profile)
+            if route["routing_target"] != "MUST_NOT_SEARCH":
+                failures.append((case["id"], route, profile["key"], profile["score"]))
+        self.assertEqual(failures, [])
+
     def test_user_reasoning_dataset_preserves_all_cases_and_rubrics(self):
         cases = load_cases(DATASET)
         self.assertEqual(len(cases), 15)
@@ -91,7 +128,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
         self.assertTrue(is_self_contained_reasoning("我不知道该选数学还是生物，你能判断我最适合哪个方向吗？", choice))
         self.assertTrue(is_self_contained_reasoning("请评价这个想法，并把它转化为可研究的问题。", research))
 
-    def test_self_contained_answer_retries_invalid_json_once(self):
+    def test_self_contained_answer_uses_single_plain_text_call(self):
         question = "证明一个命题成立的充要条件。"
         profile = classify_reasoning_task(question)
         state = {
@@ -104,15 +141,76 @@ class ReasoningCapabilityTests(unittest.TestCase):
             "teaching_strategy": {"preference_directives": []},
             "retrieval_errors": [],
         }
-        recovered = {
-            "answer": "若条件 A 成立，则逐步推出 B；反向由 B 推回 A，因此两个方向均成立。该结论以题设定义域为条件。\\boxed{A\\iff B}",
-            "followup": "要检查一个反例吗？", "discussion_prompts": [],
-        }
-        with patch("core.gardener_graph._agent_json", side_effect=[LLMError("invalid json"), recovered]) as mocked:
+        recovered = "若条件 A 成立，则逐步推出 B；反向由 B 推回 A，因此两个方向均成立。该结论以题设定义域为条件。\\boxed{A\\iff B}"
+        with patch("core.gardener_graph.chat", return_value=recovered) as plain, patch(
+            "core.gardener_graph._agent_json",
+        ) as structured:
             result = generate_answer(state)
-        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(plain.call_count, 1)
+        structured.assert_not_called()
         self.assertIn("两个方向", result["answer"])
-        self.assertEqual(result["trace"][-1]["data"]["generation_provider"], "project-model-self-contained-json-retry")
+        self.assertFalse(result["generation_failed"])
+        self.assertEqual(result["trace"][-1]["data"]["generation_provider"], "project-model-self-contained-text")
+
+    def test_closed_loop_route_marker_overrides_inactive_profile_at_generation(self):
+        question = "若两个有限集合等势，证明它们的幂集也等势。"
+        profile = classify_reasoning_task("为什么跨文化问卷分数不能直接比较？")
+        profile["activated"] = False
+        self.assertFalse(profile["activated"])
+        state = {
+            "question": question,
+            "dialogue": "",
+            "intent": {"primary_intent": "apply", "concepts": [], "query_plan": {}},
+            "reasoning_profile": profile,
+            "accepted_sources": [],
+            "evidence_review": {
+                "sufficient": False,
+                "source_roles": {},
+                "usable_claims": [],
+                "gaps": ["闭环推导由题面前提自足完成，不需要外部证据。"],
+                "routing_target": "MUST_NOT_SEARCH",
+            },
+            "teaching_strategy": {"preference_directives": []},
+            "retrieval_errors": [],
+        }
+        recovered = "设双射为 f:A→B，则 S↦f[S] 给出幂集间双射。\\boxed{|\\mathcal P(A)|=|\\mathcal P(B)|}"
+        with patch("core.gardener_graph.chat", return_value=recovered) as plain:
+            result = generate_answer(state)
+        self.assertEqual(plain.call_count, 1)
+        self.assertFalse(result["generation_failed"])
+        self.assertNotIn("这次先不补写答案", result["answer"])
+
+    def test_self_contained_provider_error_retries_once_and_recovers(self):
+        question = "证明有限树有 n-1 条边。"
+        state = {
+            "question": question,
+            "dialogue": "",
+            "intent": {"primary_intent": "apply", "concepts": [], "query_plan": {}},
+            "reasoning_profile": classify_reasoning_task(question),
+            "accepted_sources": [],
+            "evidence_review": {
+                "sufficient": False,
+                "source_roles": {},
+                "usable_claims": [],
+                "gaps": [],
+                "routing_target": "MUST_NOT_SEARCH",
+            },
+            "teaching_strategy": {"preference_directives": []},
+            "retrieval_errors": [],
+        }
+        recovered = "对顶点数归纳：删去叶结点后仍为树，边数增加一。\\boxed{|E|=n-1}"
+        with patch(
+            "core.gardener_graph.chat",
+            side_effect=[LLMError("429 model overloaded"), recovered],
+        ) as plain:
+            result = generate_answer(state)
+        self.assertEqual(plain.call_count, 2)
+        self.assertFalse(result["generation_failed"])
+        self.assertIn("n-1", result["answer"])
+        self.assertEqual(
+            result["trace"][-1]["data"]["generation_provider"],
+            "project-model-self-contained-text-retry",
+        )
 
     def test_self_contained_answer_ignores_irrelevant_sources_and_retries_empty_payload(self):
         question = "在均匀线性介质中推导波速，并说明何时不能写成固定的 1/√(με)。"
@@ -138,18 +236,14 @@ class ReasoningCapabilityTests(unittest.TestCase):
             "teaching_strategy": {"preference_directives": []},
             "retrieval_errors": [],
         }
-        recovered = {
-            "answer": (
-                "由 Maxwell 方程取旋度并用本构关系可得波动方程，"
-                "在线性、均匀、各向同性且无色散近似下有 "
-                "\\boxed{v=1/\\sqrt{\\mu\\varepsilon}}。色散、耗散或非线性时不能把 μ、ε 当固定常数。"
-            ),
-            "followup": "",
-            "discussion_prompts": [],
-        }
-        with patch("core.gardener_graph._agent_json", side_effect=[{}, recovered]) as mocked:
+        recovered = (
+            "由 Maxwell 方程取旋度并用本构关系可得波动方程，"
+            "在线性、均匀、各向同性且无色散近似下有 "
+            "\\boxed{v=1/\\sqrt{\\mu\\varepsilon}}。色散、耗散或非线性时不能把 μ、ε 当固定常数。"
+        )
+        with patch("core.gardener_graph.chat", return_value=recovered) as mocked:
             result = generate_answer(state)
-        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(mocked.call_count, 1)
         self.assertEqual(result["generation_sources"], [])
         self.assertIn("波动方程", result["answer"])
         self.assertNotIn("事实核验与信息甄别", result["answer"])
@@ -167,27 +261,25 @@ class ReasoningCapabilityTests(unittest.TestCase):
             "teaching_strategy": {"preference_directives": []},
             "retrieval_errors": [],
         }
-        recovered = {
-            "answer": "不能。得到一个特征速度不足以唯一推出坐标变换；还需相对性原理与光速不变假设。"
-            "不同变换群可以保留不同结构，因此必须补足运动学公设。\\boxed{不能单独推出}",
-            "followup": "",
-            "discussion_prompts": [],
-        }
-        with patch("core.gardener_graph._agent_json", side_effect=[LLMError("timeout"), recovered]) as mocked:
+        recovered = "不能。得到一个特征速度不足以唯一推出坐标变换；还需相对性原理与光速不变假设。不同变换群可以保留不同结构，因此必须补足运动学公设。\\boxed{不能单独推出}"
+        with patch("core.gardener_graph.chat", return_value=recovered) as mocked:
             result = generate_answer(state)
-        self.assertEqual(mocked.call_count, 2)
-        retry_prompt = mocked.call_args_list[1].args[1]
+        self.assertEqual(mocked.call_count, 1)
+        retry_prompt = mocked.call_args.args[1]
         self.assertIn(task, retry_prompt)
         self.assertNotIn("冗长调试规则", retry_prompt)
         self.assertIn("不能单独推出", result["answer"])
 
-        with patch(
+        with patch("core.gardener_graph.chat", side_effect=LLMError("timeout")) as mocked, patch(
             "core.gardener_graph._agent_json",
-            side_effect=[LLMError("timeout"), LLMError("timeout again")],
-        ) as mocked:
+        ) as structured:
             failed = generate_answer(state)
         self.assertEqual(mocked.call_count, 2)
-        self.assertIn("没有返回可解析", failed["answer"])
+        structured.assert_not_called()
+        self.assertTrue(failed["generation_failed"])
+        self.assertIn("可执行的处理方式", failed["answer"])
+        self.assertNotIn("请重试", failed["answer"])
+        self.assertNotIn("先不补写答案", failed["answer"])
 
     def test_precision_prompts_cover_nonconvex_second_order_and_uq_types(self):
         examples = [
@@ -201,18 +293,14 @@ class ReasoningCapabilityTests(unittest.TestCase):
             ),
             (
                 "只知优化器损失不再下降，判断是否最优。",
-                "边界约束情形应使用 KKT",
+                "0∈∇f(x*)+N_D(x*) 或相应 KKT 条件",
             ),
             (
                 "模型预测中等但区间窄，与上一候选如何比较？",
-                "区间是否重叠不能直接替代差值检验",
+                "不能由重叠推出‘统计上不可区分’",
             ),
         ]
-        recovered = {
-            "answer": "先区分条件，再给出可核验步骤与边界。该结论只在所列条件成立时有效。\\boxed{条件性结论}",
-            "followup": "",
-            "discussion_prompts": [],
-        }
+        recovered = "先区分条件，再给出可核验步骤与边界。该结论只在所列条件成立时有效。\\boxed{条件性结论}"
         for question, anchor in examples:
             with self.subTest(question=question):
                 state = {
@@ -227,7 +315,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
                     "teaching_strategy": {"preference_directives": []},
                     "retrieval_errors": [],
                 }
-                with patch("core.gardener_graph._agent_json", return_value=recovered) as mocked:
+                with patch("core.gardener_graph.chat", return_value=recovered) as mocked:
                     generate_answer(state)
                 self.assertIn(anchor, mocked.call_args_list[0].args[1])
 
@@ -275,9 +363,7 @@ class ReasoningCapabilityTests(unittest.TestCase):
             "teaching_strategy": {"preference_directives": []},
             "retrieval_errors": [],
         }
-        with patch("core.gardener_graph._agent_json", return_value={
-            "answer": model_answer, "followup": "是否要画真值表？", "discussion_prompts": [],
-        }):
+        with patch("core.gardener_graph.chat", return_value=model_answer):
             result = generate_answer(state)
         self.assertEqual(result["answer"], model_answer)
         self.assertNotIn("证据不足", result["answer"])

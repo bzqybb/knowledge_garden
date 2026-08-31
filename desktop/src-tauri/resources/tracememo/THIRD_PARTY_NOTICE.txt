@@ -1,0 +1,6 @@
+﻿TraceMemo is a third-party component by Wxw-Gu and its contributors.
+Source: https://github.com/Wxw-Gu/TraceMemo
+Bundled archive SHA-256: 3c0c89e463ea4acd5bbf36e2fbfbe72ad49bce6aaa39913b765c5ac596804dff
+Redistribution basis: non-commercial competition, testing, and demonstration use.
+The project owner explicitly confirmed this release scope before the build.
+See the source project and the release compliance record for applicable terms.

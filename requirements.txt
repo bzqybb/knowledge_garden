@@ -5,3 +5,4 @@ langchain-openai>=1.0,<2
 langgraph>=1.0,<2
 pydantic>=2.7,<3
 pypdf>=5.0,<7
+sympy>=1.13,<2

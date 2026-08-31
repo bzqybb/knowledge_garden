@@ -29,6 +29,7 @@ class ContextBuilder:
         request_id: str,
         message_id: str,
         active_capability: str = "gardener_chat",
+        turn_teaching_preferences: list[str] | tuple[str, ...] | None = None,
     ) -> GardenContext:
         question = question.strip()
         if not question:
@@ -83,6 +84,19 @@ class ContextBuilder:
             str(value).strip() for value in self.store.setting("selected_moc_titles", [])
             if str(value).strip()
         )
+        saved_teaching_preferences = [
+            str(value).strip()
+            for value in self.store.setting("teaching_preferences", [])
+            if str(value).strip()
+        ]
+        current_turn_preferences = [
+            str(value).strip()[:500]
+            for value in (turn_teaching_preferences or [])
+            if str(value).strip()
+        ]
+        teaching_preferences = tuple(dict.fromkeys(
+            saved_teaching_preferences + current_turn_preferences
+        ))
         return GardenContext(
             request_id=request_id,
             session_id=session_id,
@@ -99,9 +113,7 @@ class ContextBuilder:
                 grade_level=self.store.setting("grade_level", None),
                 learning_goals=tuple(self.store.setting("learning_goals", [])),
                 explicit_interests=tuple(self.store.setting("interests", [])),
-                explicit_teaching_preferences=tuple(
-                    self.store.setting("teaching_preferences", [])
-                ),
+                explicit_teaching_preferences=teaching_preferences,
             ),
             knowledge_scope=KnowledgeScope(
                 vault_id=str(self.store.setting("vault_id", "default")),

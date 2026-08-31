@@ -1,0 +1,20 @@
+[package]
+name = "knowledge-garden-desktop"
+version = "0.2.1"
+description = "Local connector and auto-updating desktop companion for Knowledge Garden"
+authors = ["Knowledge Garden"]
+edition = "2021"
+
+[lib]
+name = "knowledge_garden_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-process = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-updater = "2"

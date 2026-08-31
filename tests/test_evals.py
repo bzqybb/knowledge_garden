@@ -15,11 +15,13 @@ from evals.boundary_eval import local_checks, summarize
 from evals.deep_reasoning_eval import deep_local_checks, premise_identified
 from evals.judge_config import (
     DEEPSEEK_KEY_PATH,
+    GLM_GENERATOR_KEY_PATH,
     GLM_KEY_PATH,
     LEGACY_KEY_PATH,
     judge_api_key,
     judge_base_url,
     judge_model,
+    judge_independence,
     judge_request_options,
 )
 from evals.personalization_adoption_eval import _observable_preference_gaps
@@ -59,6 +61,14 @@ class EvaluationTests(unittest.TestCase):
             [call.args[0] for call in load.call_args_list],
             [GLM_KEY_PATH, DEEPSEEK_KEY_PATH, LEGACY_KEY_PATH],
         )
+
+    def test_explicit_generator_credential_fallback_is_disclosed(self):
+        with patch.dict("os.environ", {"JUDGE_USE_GENERATOR_CREDENTIAL": "true"}, clear=True), patch(
+            "evals.judge_config.load_secret", return_value="generator-secret",
+        ) as load:
+            self.assertEqual(judge_api_key("glm-4.5-airx"), "generator-secret")
+            self.assertEqual(judge_independence("glm-4.5-airx"), "same_provider_and_credential_lane_as_generator")
+        load.assert_called_once_with(GLM_GENERATOR_KEY_PATH)
 
     def test_tokenhub_kimi_k3_uses_provider_required_temperature(self):
         with patch.dict("os.environ", {}, clear=False):

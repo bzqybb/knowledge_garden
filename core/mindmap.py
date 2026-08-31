@@ -18,7 +18,50 @@ TITLE_ALIASES = {
     "surrogategradient": "代理梯度",
     "backpropagation": "反向传播",
     "heaviside": "阶跃函数",
+    "计算机科学与技术": "计算机科学",
+    "电气与电子工程": "电子工程",
+    "传媒学": "传播学",
 }
+
+MOC_PARENT_HINTS = {
+    "人工智能": "计算机科学",
+    "神经网络": "人工智能",
+    "类脑计算与snn": "神经网络",
+    "神经形态计算": "神经网络",
+    "神经形态计算与脉冲神经网络": "神经网络",
+}
+
+NON_KNOWLEDGE_TITLES = {
+    "com", "phone", "robot", "code", "word", "skill", "cloud", "frontier",
+    "bilibili", "pdf", "8大用法",
+}
+
+
+def _knowledge_eligibility(note: dict[str, Any]) -> tuple[bool, str]:
+    """Keep extraction residue and staging notes out of the canonical map.
+
+    This is intentionally a presentation quarantine, not destructive cleanup:
+    the original note remains available for later review or reclassification.
+    """
+    title = str(note.get("title") or "").strip()
+    tags = {str(item).strip().casefold() for item in note.get("tags", [])}
+    if note.get("kind") in {"domain", "knowledge"} and str(note.get("path", "")).startswith("domain::"):
+        return True, "curated_domain_taxonomy"
+    if "待归类的新知".casefold() in tags or title == "待归类的新知":
+        return False, "staging_area"
+    if re.fullmatch(r"BV[0-9A-Za-z]{8,14}", title):
+        return False, "source_identifier"
+    if re.fullmatch(r"https?://\S+|www\.\S+", title, re.I):
+        return False, "url_identifier"
+    if title.casefold() in NON_KNOWLEDGE_TITLES:
+        return False, "generic_extraction_token"
+    if re.fullmatch(r"\d+\s*(?:大|种|个)?(?:用法|方法|技巧|步骤)", title):
+        return False, "contextless_list_label"
+    if re.match(r"^(?:为什么|怎么|如何|能不能|是否|请问|帮我)", title) or title.endswith(("?", "？")):
+        return False, "uncompiled_question"
+    if not title or len(title) > 90:
+        return False, "invalid_title"
+    return True, "eligible"
 
 
 def _canonical_title(title: str) -> str:
@@ -50,6 +93,49 @@ def _summary(content: str, title: str) -> str:
     return title
 
 
+def branch_diagram_blueprint(tree: dict[str, Any], node_id: int) -> dict[str, Any] | None:
+    """Create a bounded, auditable visual brief from one canonical subtree."""
+    target: dict[str, Any] | None = None
+
+    def find(node: dict[str, Any]) -> None:
+        nonlocal target
+        if target is not None:
+            return
+        if node.get("id") == node_id:
+            target = node
+            return
+        for child in node.get("children", []):
+            find(child)
+
+    find(tree)
+    if target is None:
+        return None
+    relations: list[str] = []
+    queue = [target]
+    node_count = 0
+    while queue and node_count < 16:
+        parent = queue.pop(0)
+        node_count += 1
+        for child in parent.get("children", []):
+            if node_count + len(queue) >= 16:
+                break
+            relations.append(f"{parent.get('title', '')} 包含 {child.get('title', '')}")
+            queue.append(child)
+    return {
+        "research_object": str(target.get("title") or "知识分支"),
+        "core_question": f"展开 {target.get('title', '知识分支')} 的已学知识结构",
+        "usable_claims": relations[:15],
+        "explanation_order": [
+            str(child.get("title")) for child in target.get("children", [])[:8]
+        ],
+        "direct_source_ids": [],
+        "evidence_items": [],
+        "gaps": [],
+        "canonical_subtree": target,
+        "visible_node_count": node_count,
+    }
+
+
 def build_mindmap(store: GardenStore) -> dict[str, Any]:
     """Compile the graph into one canonical discipline → branch → topic → knowledge tree."""
     with store.connect() as conn:
@@ -61,14 +147,27 @@ def build_mindmap(store: GardenStore) -> dict[str, Any]:
                ORDER BY title"""
         ).fetchall()
         notes = {}
+        quarantined: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
             item["tags"] = json.loads(item.pop("tags_json") or "[]")
             item["summary"] = _summary(item["content"], item["title"])
             item["knowledge_value"] = note_activation(item)
+            eligible, reason = _knowledge_eligibility(item)
+            if not eligible:
+                quarantined.append({"id": item["id"], "title": item["title"], "reason": reason})
+                continue
             notes[item["id"]] = item
         if not notes:
-            return {"tree": {"id": "root", "title": "我的知识花园", "kind": "root", "children": []}, "cross_links": []}
+            return {
+                "tree": {"id": "root", "title": "我的知识花园", "kind": "root", "children": []},
+                "cross_links": [],
+                "quality": {
+                    "quarantined_count": len(quarantined),
+                    "quarantined": quarantined[:40],
+                    "policy": "knowledge-admission-v2",
+                },
+            }
         marks = ",".join("?" for _ in notes)
         edges = [dict(row) for row in conn.execute(
             f"""SELECT id,source_id,target_id,relation,strength,explanation,status
@@ -139,6 +238,36 @@ def build_mindmap(store: GardenStore) -> dict[str, Any]:
     moc_set = set(moc_ids)
     moc_children: dict[int, set[int]] = defaultdict(set)
     child_mocs: set[int] = set()
+    explicit_moc_parent: dict[int, int] = {}
+    for child in moc_ids:
+        child_key = _canonical_title(notes[child]["title"])
+        candidates = [
+            parent for parent in moc_ids if parent != child
+            and _canonical_title(notes[parent]["title"]) in {
+                _canonical_title(tag) for tag in notes[child].get("tags", [])
+            }
+            and _canonical_title(notes[parent]["title"]) != child_key
+        ]
+        if candidates:
+            explicit_moc_parent[child] = max(
+                candidates, key=lambda item: len(_canonical_title(notes[item]["title"]))
+            )
+    for child, parent in explicit_moc_parent.items():
+        moc_children[parent].add(child)
+        child_mocs.add(child)
+
+    moc_by_key = {_canonical_title(notes[item]["title"]): item for item in moc_ids}
+    for child_key, parent_key in MOC_PARENT_HINTS.items():
+        child = moc_by_key.get(_canonical_title(child_key))
+        parent = moc_by_key.get(_canonical_title(parent_key))
+        if child is not None and parent is not None and child != parent:
+            old_parent = explicit_moc_parent.get(child)
+            if old_parent is not None:
+                moc_children[old_parent].discard(child)
+            explicit_moc_parent[child] = parent
+            moc_children[parent].add(child)
+            child_mocs.add(child)
+
     for edge in edges:
         if edge["relation"] != "wikilink":
             continue
@@ -146,8 +275,14 @@ def build_mindmap(store: GardenStore) -> dict[str, Any]:
         right = moc_alias.get(edge["target_id"])
         if left not in moc_set or right not in moc_set or left == right:
             continue
+        if left in explicit_moc_parent or right in explicit_moc_parent:
+            continue
         left_key = _canonical_title(notes[left]["title"])
         right_key = _canonical_title(notes[right]["title"])
+        # A cross-reference is not automatically a hierarchy. Only infer a
+        # parent when one visible label genuinely specializes the other.
+        if left_key not in right_key and right_key not in left_key:
+            continue
         parent, child = (left, right) if len(left_key) <= len(right_key) else (right, left)
         moc_children[parent].add(child)
         child_mocs.add(child)
@@ -293,12 +428,29 @@ def build_mindmap(store: GardenStore) -> dict[str, Any]:
         note_id for note_id in concept_ids
         if note_id not in rooted and note_id not in claimed_concepts
     ]
-    if remaining:
-        top_nodes.append({
-            "id": "unclassified", "title": "待归类的新知", "kind": "discipline",
-            "summary": "尚未挂载到主题 MOC 的概念。", "tags": [],
-            "children": [make_node(item) for item in sorted(remaining, key=lambda item: notes[item]["title"])],
-        })
+    # Unmounted concepts stay in the review queue; they are not promoted to a
+    # fake discipline in the canonical learning map.
+    unmounted_count = len(remaining)
+
+    def merge_nodes(target: dict[str, Any], incoming: dict[str, Any]) -> None:
+        existing = {_canonical_title(item["title"]): item for item in target.get("children", [])}
+        for child in incoming.get("children", []):
+            key = _canonical_title(child["title"])
+            if key in existing:
+                merge_nodes(existing[key], child)
+            else:
+                target.setdefault("children", []).append(child)
+
+    merged_top: list[dict[str, Any]] = []
+    top_by_key: dict[str, dict[str, Any]] = {}
+    for node in top_nodes:
+        key = _canonical_title(node["title"])
+        if key in top_by_key:
+            merge_nodes(top_by_key[key], node)
+        else:
+            top_by_key[key] = node
+            merged_top.append(node)
+    top_nodes = merged_top
 
     included_ids: set[int] = set()
     discipline_by_id: dict[int, str] = {}
@@ -324,4 +476,10 @@ def build_mindmap(store: GardenStore) -> dict[str, Any]:
     return {
         "tree": {"id": "root", "title": "我的知识花园", "kind": "root", "children": top_nodes},
         "cross_links": cross_links,
+        "quality": {
+            "quarantined_count": len(quarantined),
+            "unmounted_count": unmounted_count,
+            "quarantined": quarantined[:40],
+            "policy": "knowledge-admission-v2",
+        },
     }

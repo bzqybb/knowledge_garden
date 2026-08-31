@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from core.llm import LLMError, chat_json
+from core.llm import LLMError, chat_json, understanding_chat_json
 from core.obsidian import parse_markdown, write_raw_material, write_wiki_asset
 from core.retrieval import search_notes, tokenize
 from core.storage import GardenStore, utc_now
+from core.transcript import select_relevant_chunks, split_timestamped_text, timestamp_evidence
 
 
 TECH_TERM_RE = re.compile(r"[A-Za-z][A-Za-z0-9+\-]{2,}|[\u4e00-\u9fff]{2,12}(?:算法|模型|网络|定理|原理|效应|方法|机制|理论|系统|结构|函数|学习)")
@@ -24,6 +27,14 @@ KNOWN_CONCEPTS = [
     "代理梯度", "脉冲神经网络", "替代梯度", "反向传播", "注意力机制", "梯度下降",
     "集体主义", "个人主义",
 ]
+
+
+def _frontier_json(system: str, user: str, *, timeout: float = 15) -> dict[str, Any] | None:
+    """Run bounded structured article work on the low-latency model route."""
+    payload, _provider = understanding_chat_json(
+        system, user, timeout=timeout, max_retries=0,
+    )
+    return payload
 
 CONCEPT_PROFILES: dict[str, dict[str, Any]] = {
     "参照群体效应": {
@@ -83,36 +94,110 @@ def _valid_concept(value: str) -> bool:
     return not value.startswith(sentence_prefixes)
 
 
-def extract_concepts(text: str, level: str = "本科入门") -> list[str]:
-    try:
-        result = chat_json(
-            "你是严谨的学术编辑，只返回 JSON。",
-            f"读者水平：{level}\n从材料中提取 1~3 个最值得学习的核心技术概念。"
-            f"返回 {{\"concepts\":[\"概念\"]}}。\n材料：{text[:6000]}",
+def _analysis_source_text(text: str) -> str:
+    """Prefer the verbatim transcript when the UI submits guide + transcript."""
+    source = str(text or "")
+    marker = re.search(r"^##\s*(?:带时间戳的)?转录[^\n]*\n", source, re.MULTILINE)
+    if marker and source[marker.end():].strip():
+        return source[marker.end():].strip()
+    return source.strip()
+
+
+def _verbatim_concept_excerpt(text: str, concept: str, radius: int = 180) -> str:
+    source = str(text or "")
+    position = source.lower().find(str(concept or "").lower())
+    if position < 0:
+        return ""
+    start = max(0, position - radius)
+    end = min(len(source), position + len(concept) + radius)
+    return re.sub(r"\s+", " ", source[start:end]).strip()
+
+
+def extract_concepts_with_evidence(text: str, level: str = "本科入门") -> dict[str, Any]:
+    """Extract concepts hierarchically from the whole source, not only its opening."""
+    source = _analysis_source_text(text)
+    chunks = split_timestamped_text(source, max_chars=9000) or [source]
+    candidates: dict[str, dict[str, Any]] = {}
+
+    def remember(name: str, evidence: str = "", chunk_index: int = 0) -> None:
+        cleaned = str(name or "").strip()
+        if not _valid_concept(cleaned):
+            return
+        canonical = cleaned.replace("—", "-")
+        normalized_name = canonical.casefold().replace("（", "(").replace("）", ")")
+        existing = next(
+            (name for name in candidates if name.casefold().replace("（", "(").replace("）", ")") == normalized_name),
+            canonical,
         )
-        if result and isinstance(result.get("concepts"), list):
-            concepts = [str(item).strip() for item in result["concepts"] if _valid_concept(str(item))]
-            if concepts:
-                return concepts[:3]
-    except LLMError:
-        pass
-    known = []
-    normalized = text.replace("—", "-")
+        record = candidates.setdefault(existing, {"support": set(), "evidence": []})
+        record["support"].add(chunk_index)
+        excerpt = str(evidence or "").strip().strip('“”"')
+        if excerpt and re.sub(r"\s+", "", excerpt) in re.sub(r"\s+", "", source):
+            if excerpt not in record["evidence"]:
+                record["evidence"].append(excerpt)
+
+    for index, chunk in enumerate(chunks):
+        try:
+            result = _frontier_json(
+                "你是严谨的学术编辑，只返回 JSON。不得只概括开头；当前材料已经按原始顺序分块。概念必须是可教学的名词性术语，evidence 必须逐字引用当前分块，若有时间戳须保留。",
+                f"读者水平：{level}\n这是全文第 {index + 1}/{len(chunks)} 块。"
+                "从本块提取 1~3 个最值得学习的核心技术概念。"
+                f"返回 {{\"concepts\":[{{\"name\":\"概念\",\"evidence\":\"原文短句\"}}]}}。\n材料：\n{chunk}",
+            )
+        except LLMError:
+            result = None
+        if not isinstance(result, dict) or not isinstance(result.get("concepts"), list):
+            continue
+        for item in result["concepts"]:
+            if isinstance(item, dict):
+                remember(str(item.get("name") or ""), str(item.get("evidence") or ""), index)
+            else:
+                remember(str(item), "", index)
+
+    normalized = source.replace("—", "-")
     for term in KNOWN_CONCEPTS:
         canonical = term.replace("—", "-")
-        if canonical in normalized and canonical not in [item.replace("—", "-") for item in known]:
-            known.append(term.replace("—", "-"))
-    if known:
-        return known[:3]
-    candidates = [term for term in TECH_TERM_RE.findall(text) if _valid_concept(term)]
+        if canonical in normalized:
+            remember(canonical, _verbatim_concept_excerpt(source, canonical), len(chunks))
+
+    if candidates:
+        ranked = sorted(
+            candidates,
+            key=lambda name: (
+                len(candidates[name]["support"]),
+                normalized.lower().count(name.lower()),
+                len(name),
+            ),
+            reverse=True,
+        )[:3]
+        evidence: dict[str, list[str]] = {}
+        for concept in ranked:
+            quoted = list(candidates[concept]["evidence"])
+            if not quoted:
+                selected = select_relevant_chunks(chunks, concept, limit=1)
+                quoted = timestamp_evidence(selected[0], concept, limit=2) if selected else []
+            if not quoted:
+                excerpt = _verbatim_concept_excerpt(source, concept)
+                quoted = [excerpt] if excerpt else []
+            evidence[concept] = quoted[:3]
+        return {"concepts": ranked, "evidence": evidence, "chunks": chunks, "source_text": source}
+
+    fallback_candidates = [term for term in TECH_TERM_RE.findall(source) if _valid_concept(term)]
     counts: dict[str, int] = {}
-    for term in candidates:
+    for term in fallback_candidates:
         counts[term] = counts.get(term, 0) + 1
     ranked = sorted(counts, key=lambda term: (counts[term], len(term)), reverse=True)
     if ranked:
-        return ranked[:3]
-    tokens = [token for token in tokenize(text) if len(token) >= 3]
-    return list(dict.fromkeys(tokens))[:2] or [text.strip()[:16] or "新概念"]
+        concepts = ranked[:3]
+    else:
+        tokens = [token for token in tokenize(source) if len(token) >= 3]
+        concepts = list(dict.fromkeys(tokens))[:2] or [source.strip()[:16] or "新概念"]
+    evidence = {concept: [_verbatim_concept_excerpt(source, concept)] for concept in concepts}
+    return {"concepts": concepts, "evidence": evidence, "chunks": chunks, "source_text": source}
+
+
+def extract_concepts(text: str, level: str = "本科入门") -> list[str]:
+    return list(extract_concepts_with_evidence(text, level)["concepts"])
 
 
 ARTICLE_DOMAIN_SIGNALS: list[tuple[str, tuple[str, ...]]] = [
@@ -261,64 +346,104 @@ def analyze_material_structure(
     }
 
 
-def _fallback_bridge(concept: str, refs: list[dict[str, Any]], level: str) -> dict[str, Any]:
+def _bridge_source_sentences(text: str) -> list[str]:
+    clean = re.sub(r"---\s*相关原文分块\s*---", " ", str(text or ""))
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return [
+        item.strip() for item in re.split(r"(?<=[。！？!?])\s*", clean)
+        if len(item.strip()) >= 12
+    ]
+
+
+def _fallback_bridge(
+    concept: str, refs: list[dict[str, Any]], level: str,
+    frontier_text: str = "", evidence: list[str] | None = None,
+) -> dict[str, Any]:
     profile = CONCEPT_PROFILES.get(concept, {})
+    sentences = _bridge_source_sentences(frontier_text)
+    evidence = [str(item).strip() for item in (evidence or []) if str(item).strip()]
+    concept_sentences = [item for item in sentences if concept.casefold() in item.casefold()]
+    core_claim = evidence[0] if evidence else (concept_sentences[0] if concept_sentences else (sentences[0] if sentences else concept))
+    mechanism_candidates = [
+        item for item in sentences
+        if item != core_claim and re.search(r"因为|通过|导致|使得|包含|分为|首先|第二|第三|核心|系统", item)
+    ]
+    boundary_candidates = [
+        item for item in sentences
+        if re.search(r"但|并不|不等于|不是|限制|可能|只有|如果|否则|矛盾|失效|幻觉", item)
+    ]
+    mechanism = "".join(mechanism_candidates[:2]) or "".join(
+        item for item in concept_sentences[1:3] if item != core_claim
+    ) or "".join(sentences[1:3])
+    boundary = "".join(boundary_candidates[:2]) or "这段材料没有给出更明确的适用边界，需要额外证据才能外推。"
+    why_it_matters = next(
+        (item for item in sentences if re.search(r"因此|意味着|更合理|可以用来|关键|核心", item)),
+        core_claim,
+    )
+    mapping = ""
     if refs:
         ref = refs[0]
-        mapping = f"最接近的教材入口是《{ref['title']}》：{ref['snippet']}"
-    else:
-        mapping = "当前教材库没有直接命中；建议先补充课程大纲或包含该主题的教材章节。"
+        mapping = f"已有知识中最接近的节点是《{ref['title']}》：{ref['snippet']}"
     return {
-        "analogy": profile.get("example") or f"把“{concept}”想成一株嫁接的新枝：它不是凭空出现，而是在熟悉的基础规律上增加了新的约束、尺度或用途。",
+        "core_claim": core_claim,
+        "mechanism": mechanism or core_claim,
+        "boundary": boundary,
+        "why_it_matters": why_it_matters,
         "textbook_mapping": mapping,
-        "evolution": profile.get("mechanism") or f"先确认教材中的基本对象和适用条件，再比较“{concept}”改变了哪个假设、增加了哪种能力。",
-        "learning_position": "这是一颗“待嫁接种子”：先从命中的教材节点复习定义与假设，再阅读前沿材料中的扩展部分。" if refs else "这是一颗“悬浮种子”：当前知识库缺少可靠前置节点，建议先补入课程大纲或基础章节，再决定学习顺序。",
         "prerequisites": [ref["title"] for ref in refs[:2]],
-        "confidence": 0.72 if refs else 0.35,
         "questions": profile.get("questions") or [
-            f"如果去掉“{concept}”最关键的新条件，它会退化成教材里的什么？",
-            "这项扩展解决了旧方法的哪个失败场景？",
+            f"材料中哪一步让“{concept}”从相关文字变成了能支持结论的依据？",
+            f"在什么情况下，材料对“{concept}”的这个论断会失效？",
         ],
-        "quiz": profile.get("quiz") or {"question": f"理解“{concept}”时最应该先做什么？", "options": ["找到教材中的基础对象与假设", "只背结论", "忽略适用条件", "只看术语翻译"], "answer": 0},
+        "quiz": profile.get("quiz") or {"question": f"对“{concept}”的可靠理解应优先核对什么？", "options": ["原文命题、机制和边界是否彼此对得上", "卡片的修辞是否生动", "概念名称是否足够新", "是否找到了任意教材章节"], "answer": 0},
     }
 
 
 def generate_bridge(
     store: GardenStore, concept: str, frontier_title: str, frontier_text: str, frontier_url: str = "",
-    raw_link: str = "",
+    raw_link: str = "", concept_evidence: list[str] | None = None,
+    use_model: bool = True,
 ) -> dict[str, Any]:
     level = str(store.setting("learning_level", "本科入门"))
-    refs = search_notes(store, concept + " " + frontier_text[:1200], kinds={"textbook", "course", "concept"}, limit=3)
+    evidence = [str(item).strip() for item in (concept_evidence or []) if str(item).strip()][:3]
+    refs = search_notes(store, concept + " " + frontier_text[:2400], kinds={"textbook", "course", "concept"}, limit=3)
     context = "\n\n".join(f"[{ref['title']}] {ref['snippet']}" for ref in refs) or "暂无教材命中"
     result: dict[str, Any] | None = None
-    try:
-        result = chat_json(
+    if use_model:
+        try:
+            result = _frontier_json(
             "你是一位循循善诱、拒绝编造引用的大学导师。只返回 JSON。",
             f"学生水平：{level}\n前沿材料：{frontier_title}\n核心概念：{concept}\n"
-            f"材料摘录：{frontier_text[:3500]}\n教材检索结果：\n{context}\n"
-            "生成个性化教材—前沿对照卡。返回字段 analogy、textbook_mapping、evolution、learning_position、"
-            "prerequisites（仅从教材结果选）、confidence（0~1）、questions(2条)、"
-            "quiz（含 question、options 四项、answer 为 0-3）。只允许引用给出的教材结果。",
-        )
-    except LLMError:
-        result = None
-    payload = _fallback_bridge(concept, refs, level)
+            f"与该概念最相关的原文分块（可能来自材料中后段）：\n{frontier_text[:12000]}\n"
+            f"可核查原文证据：\n" + ("\n".join(f"- {item}" for item in evidence) or "- 暂无精确时间戳证据") +
+            f"\n教材检索结果：\n{context}\n"
+            "生成基于正文的导读卡。返回 core_claim（材料对该概念的具体命题）、mechanism（命题成立的步骤或因果链）、"
+            "boundary（原文的限制、反例或不能外推之处）、why_it_matters（它解决什么判断问题）、textbook_mapping、"
+            "prerequisites（仅从已给知识节点选）、questions(2条)、quiz（question、options四项、answer为0-3）。"
+            "core_claim、mechanism、boundary 必须能回到原文核对，禁止输出‘悬浮种子’、‘嫁接新枝’、‘先补教材’等通用比喻或缺省占位话。"
+            "没有知识节点命中时 textbook_mapping 和 prerequisites 留空，不得把缺失本身当成导读内容。",
+            )
+        except LLMError:
+            result = None
+    payload = _fallback_bridge(concept, refs, level, frontier_text, evidence)
     if result:
-        for key in ["analogy", "textbook_mapping", "evolution", "learning_position", "prerequisites", "confidence", "questions", "quiz"]:
+        for key in ["core_claim", "mechanism", "boundary", "why_it_matters", "textbook_mapping", "prerequisites", "questions", "quiz"]:
             if result.get(key):
                 payload[key] = result[key]
     explanation = (
-        f"## 在你的知识树中的位置\n{payload['learning_position']}\n\n"
-        f"**关联置信度：{float(payload['confidence']):.0%}**\n\n"
-        f"## 一句话类比\n{payload['analogy']}\n\n"
-        f"## 教材映射\n{payload['textbook_mapping']}\n\n"
-        f"## 从教材到前沿\n{payload['evolution']}"
+        f"## 原文中的核心命题\n{payload['core_claim']}\n\n"
+        f"## 它是怎样成立的\n{payload['mechanism']}\n\n"
+        f"## 它解决了什么判断问题\n{payload['why_it_matters']}\n\n"
+        f"## 边界、反例与不能外推之处\n{payload['boundary']}"
+        + ("\n\n## 可核对的原文\n" + "\n".join(f"- {item}" for item in evidence) if evidence else "")
+        + (f"\n\n## 与已有知识的连接\n{payload['textbook_mapping']}" if payload.get("textbook_mapping") else "")
     )
     card = {
         "concept": concept,
         "frontier_title": frontier_title,
         "frontier_url": frontier_url,
         "textbook_refs": refs,
+        "source_evidence": evidence,
         "explanation": explanation,
         "questions": payload["questions"],
         "quiz": payload["quiz"],
@@ -344,13 +469,28 @@ def generate_bridge(
     return card
 
 
-def analyze_frontier(store: GardenStore, title: str, text: str, url: str = "") -> dict[str, Any]:
+def analyze_frontier(
+    store: GardenStore, title: str, text: str, url: str = "", *, fast: bool = False,
+) -> dict[str, Any]:
     if not text.strip():
         raise ValueError("请粘贴需要分析的文章摘要或正文")
     material_title = title or "前沿材料"
     raw_path = None
     vault = store.setting("vault_path", "")
     removed = store.purge_frontier(material_title)
+    source_digest = hashlib.sha256(
+        f"{material_title}\n{url}\n{text}".encode("utf-8", errors="replace")
+    ).hexdigest()
+    source_note_id, _ = store.upsert_note({
+        "path": f"frontier-input::{source_digest[:20]}",
+        "title": material_title,
+        "kind": "frontier",
+        "content": text.strip(),
+        "tags": ["前沿", "用户输入", "已生成导读"],
+        "source": "public_input" if not vault else "web_input",
+        "source_url": url,
+        "content_hash": source_digest,
+    })
     archived: list[str] = []
     if vault:
         bridge_dir = Path(vault) / "wiki" / "02-降维对照"
@@ -368,15 +508,97 @@ def analyze_frontier(store: GardenStore, title: str, text: str, url: str = "") -
                     continue
     if vault:
         raw_path = write_raw_material(vault, material_title, text, url, ["前沿", "网页输入"])
-    concepts = extract_concepts(text, str(store.setting("learning_level", "本科入门")))
-    cards = [
-        generate_bridge(store, concept, material_title, text, url, raw_path.stem if raw_path else "")
-        for concept in concepts
-    ]
-    discipline, branch = infer_taxonomy(material_title, text)
+    extraction = extract_concepts_with_evidence(
+        text, str(store.setting("learning_level", "本科入门")),
+    )
+    source_text = str(extraction["source_text"])
+    chunks = list(extraction["chunks"])
+    timestamped_material = len(re.findall(r"(?m)^\[\d{2}:\d{2}:\d{2}\s*-->", source_text)) >= 3
+    if timestamped_material:
+        # Import lazily to keep the generic article pipeline independent of the
+        # optional Bilibili runtime.  This path performs chunked GLM reading and
+        # binds every retained key point back to a real subtitle timestamp.
+        from core.bilibili_mcp import _video_analysis
+
+        guide = _video_analysis(material_title, source_text, "timestamped_transcript")
+    else:
+        try:
+            generated = _frontier_json(
+                "你是严谨的大学材料导读编辑。只根据给定正文输出 JSON，不编造来源或知识卡片。",
+                f"标题：{material_title}\n学生水平：{store.setting('learning_level', '本科入门')}\n"
+                f"正文：\n{source_text[:24000]}\n\n"
+                "返回 overview（2~4句）、chapter_outline（按材料结构列出title与summary）、"
+                "key_points（3~6项，每项含point、evidence、boundary）、concepts（只保留值得学习的学术或机制概念）、"
+                "caveats、questions（2~4项）。evidence 必须是正文中的短原话。禁止输出泛词、修辞词、孤立人名或英文残片。",
+            ) or {}
+        except LLMError as exc:
+            generated = {"generation_failed": True, "generation_error": str(exc)}
+        guide = {
+            "overview": str(generated.get("overview") or ""),
+            "chapter_outline": list(generated.get("chapter_outline") or []),
+            "key_points": list(generated.get("key_points") or []),
+            "concepts": list(generated.get("concepts") or []),
+            "caveats": list(generated.get("caveats") or []),
+            "questions": list(generated.get("questions") or []),
+            "generation_failed": bool(generated.get("generation_failed")),
+            "generation_error": str(generated.get("generation_error") or ""),
+            "coverage": {"chunks": len(chunks), "processed_chunks": len(chunks)},
+        }
+    if guide.get("generation_failed"):
+        raise ValueError(
+            "原材料和字幕已保存，但 GLM 深度导读失败："
+            + str(guide.get("generation_error") or "模型没有返回可解析结果")
+        )
+    raw_concepts = list(guide.get("concepts") or [])
+    concepts: list[str] = []
+    for item in raw_concepts:
+        name = str(item.get("name") if isinstance(item, dict) else item).strip()
+        if _valid_concept(name) and name not in concepts:
+            concepts.append(name)
+        if len(concepts) >= 8:
+            break
+    discipline, branch = infer_taxonomy(material_title, source_text)
+    guide_path = ""
+    if vault:
+        def lines(items: list[Any], formatter) -> str:
+            rendered = [formatter(item) for item in items]
+            return "\n".join(item for item in rendered if item.strip()) or "- 暂无"
+
+        chapters = lines(list(guide.get("chapter_outline") or []), lambda item: (
+            f"### {str(item.get('title') or '未命名章节').strip()}\n\n"
+            f"{str(item.get('summary') or '').strip()}" if isinstance(item, dict) else f"### {str(item).strip()}"
+        ))
+        key_points = lines(list(guide.get("key_points") or []), lambda item: (
+            f"### {str(item.get('point') or '').strip()}\n\n"
+            f"- **原文证据**：{str(item.get('evidence') or '').strip()}\n"
+            f"- **适用边界**：{str(item.get('boundary') or '').strip()}"
+            if isinstance(item, dict) else f"- {str(item).strip()}"
+        ))
+        concept_links = "、".join(f"[[{item}]]" for item in concepts) or "暂无可靠概念"
+        caveats = lines(list(guide.get("caveats") or []), lambda item: f"- {str(item).strip()}")
+        questions = lines(list(guide.get("questions") or []), lambda item: f"- {str(item).strip()}")
+        source_ref = f"[原始链接]({url})" if url else f"[[sources/{Path(raw_path).stem}]]" if raw_path else "用户输入材料"
+        body = (
+            f"> **来源**：{source_ref}\n> **分析方式**：GLM 深度导读；论点仅依据当前材料。\n\n"
+            f"## 一句话总览\n\n{str(guide.get('overview') or '').strip()}\n\n"
+            f"## 内容脉络\n\n{chapters}\n\n"
+            f"## 核心论点与证据\n\n{key_points}\n\n"
+            f"## 可继续学习的概念\n\n{concept_links}\n\n"
+            f"## 局限与待核验之处\n\n{caveats}\n\n"
+            f"## 继续思考\n\n{questions}"
+        )
+        guide_path = str(write_wiki_asset(
+            vault, "02-降维对照", f"{material_title}｜GLM 深度导读", body,
+            ["前沿导读", discipline, branch],
+        ))
     return {
-        "concepts": concepts, "cards": cards, "raw_path": str(raw_path) if raw_path else "",
+        "concepts": concepts, "guide": guide, "cards": [],
+        "raw_path": str(raw_path) if raw_path else "", "guide_path": guide_path,
+        "source_note_id": source_note_id,
+        "saved_to": "isolated_cloud_garden" if not vault else "obsidian_and_local_index",
+        "analysis_mode": "glm_deep_read",
         "discipline": discipline, "branch": branch, "removed": removed, "archived": archived,
+        "coverage": {"source_chars": len(source_text), "chunks": len(chunks), "processed_chunks": len(chunks)},
     }
 
 
