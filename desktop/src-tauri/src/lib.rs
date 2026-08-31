@@ -2,7 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{Manager, RunEvent, State};
@@ -159,18 +159,50 @@ fn start_tracememo(resource_dir: &Path, data_dir: &Path) -> Option<Child> {
             resource_dir.join("tracememo/TraceMemo-setup.exe"),
         ];
         if let Some(installer) = installers.iter().find(|candidate| candidate.is_file()) {
-            let _ = Command::new(installer).arg("/S").status();
+            let mut install_command = Command::new(installer);
+            install_command
+                .arg("/S")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                install_command.creation_flags(0x08000000);
+            }
+            let _ = install_command.status();
             executable = tracememo_executable(resource_dir);
         }
     }
     let executable = executable?;
     let mut command = Command::new(executable);
     let temp_dir = data_dir.join("tmp").join("tracememo");
+    let log_dir = data_dir.join("logs");
     let _ = fs::create_dir_all(&temp_dir);
+    let _ = fs::create_dir_all(&log_dir);
+    let trace_log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("tracememo.log"))
+        .ok();
+    let trace_error_log = trace_log.as_ref().and_then(|log| log.try_clone().ok());
     command
+        .arg("--tray")
+        .env("WXE_TRAY", "1")
         .env("TEMP", &temp_dir)
         .env("TMP", &temp_dir)
-        .env("TMPDIR", &temp_dir);
+        .env("TMPDIR", &temp_dir)
+        .stdin(Stdio::null());
+    if let Some(log) = trace_log {
+        command.stdout(Stdio::from(log));
+    } else {
+        command.stdout(Stdio::null());
+    }
+    if let Some(log) = trace_error_log {
+        command.stderr(Stdio::from(log));
+    } else {
+        command.stderr(Stdio::null());
+    }
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;

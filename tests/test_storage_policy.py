@@ -68,6 +68,14 @@ class StoragePolicyTests(unittest.TestCase):
         self.assertIn("TcpStream::connect_timeout", rust)
         self.assertIn("return None", rust[availability_check:process_spawn])
 
+    def test_desktop_starts_tracememo_in_background_tray_mode(self):
+        rust = (ROOT / "desktop" / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+        self.assertIn('.arg("--tray")', rust)
+        self.assertIn('.env("WXE_TRAY", "1")', rust)
+        self.assertIn('log_dir.join("tracememo.log")', rust)
+        self.assertIn(".stdin(Stdio::null())", rust)
+        self.assertIn("command.creation_flags(0x08000000)", rust)
+
 
 if __name__ == "__main__":
     unittest.main()

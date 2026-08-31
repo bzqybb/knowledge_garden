@@ -67,6 +67,21 @@ class ProductSemanticsTests(unittest.TestCase):
         self.assertNotRegex(formatter, r"r\.transcript\.(?:slice|substring)\(")
         self.assertIn("n.content=formatVideoAnalysis(a,r)", source)
 
+    def test_frontier_badge_tracks_unseen_feed_items_not_manual_read_state(self):
+        source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('storageKey("frontierSeenUrls")', source)
+        self.assertIn("function markFrontierSeen", source)
+        self.assertIn('if (name === "frontier") { loadFrontierNotes(); markFrontierSeen(); }', source)
+        alert = source[source.index("function updateFrontierAlert"):]
+        self.assertIn("frontierItemKey", alert)
+        self.assertNotIn("filter(item=>!item.read)", alert[:500])
+
+    def test_mindmap_is_grouped_under_more_tools(self):
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        more = html.index('id="nav-tools"')
+        mindmap = html.index('data-view="garden"')
+        self.assertGreater(mindmap, more)
+
 
 if __name__ == "__main__":
     unittest.main()

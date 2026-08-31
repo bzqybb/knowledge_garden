@@ -416,9 +416,39 @@ def retrieval_warmup(stop_event: threading.Event) -> None:
 
 class GardenHandler(BaseHTTPRequestHandler):
     server_version = "KnowledgeGarden/1.0"
+    desktop_origins = {
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+        "tauri://localhost",
+    }
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"[知识花园] {self.address_string()} - {fmt % args}")
+
+    def _desktop_cors_origin(self) -> str:
+        if not os.getenv("GARDEN_DESKTOP_INSTANCE_ID", "").strip():
+            return ""
+        origin = str(self.headers.get("Origin") or "").strip()
+        return origin if origin in self.desktop_origins else ""
+
+    def end_headers(self) -> None:
+        origin = self._desktop_cors_origin()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Credentials", "true")
+            self.send_header("Access-Control-Allow-Private-Network", "true")
+            self.send_header("Vary", "Origin")
+        super().end_headers()
+
+    def do_OPTIONS(self) -> None:
+        if not self._desktop_cors_origin():
+            self.send_error(HTTPStatus.FORBIDDEN)
+            return
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.end_headers()
 
     def _json(self, data, status: int = 200) -> None:
         payload = json.dumps(data, ensure_ascii=False).encode("utf-8")

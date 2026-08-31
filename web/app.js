@@ -206,13 +206,13 @@ function renderAgentVisualization(spec = {}) {
 function switchView(name) {
   if(isPublicMode&&name==="wechat"){name="settings";toast("微信需要用户电脑上的桌面连接器",true)}
   $$(".nav").forEach(n => n.classList.toggle("active", n.dataset.view === name));
-  $("#nav-more")?.classList.toggle("active",["capture","wechat","settings"].includes(name));
+  $("#nav-more")?.classList.toggle("active",["garden","growth","wechat","settings"].includes(name));
   $$(".view").forEach(v => v.classList.toggle("active", v.id === `view-${name}`));
   const titles = {home:"早上好，园丁",frontier:"前沿雷达",growth:"我的成长",garden:"学科思维导图",capture:"灵感温室",wechat:"微信苗圃",settings:"花园设置"};
   $("#page-title").textContent = titles[name];
   if (name === "garden") loadGarden();
   if (name === "growth") loadGrowth();
-  if (name === "frontier") loadFrontierNotes();
+  if (name === "frontier") { loadFrontierNotes(); markFrontierSeen(); }
   if (name === "wechat") loadWechatCandidates();
   scrollTo({top:0,behavior:"smooth"});
 }
@@ -576,6 +576,7 @@ async function loadDaily(force=false){
     const profile=data.profile||{},basis=profile.basis||[],directions=data.chosen_directions||[];
     $("#daily-profile").innerHTML=`本轮巡视：<b>${escapeHTML(directions.join("、")||"等待选择方向")}</b> · ${escapeHTML(data.level||"本科入门")}${basis.length?` <details class="profile-basis"><summary>为什么选这些</summary>${basis.map(item=>`<span>${escapeHTML(item)}</span>`).join("")}</details>`:""}`;
     updateFrontierAlert(dailyItems,data);
+    if($("#view-frontier")?.classList.contains("active"))markFrontierSeen(dailyItems);
     const notice=data.notice?`<div class="source-notice">${escapeHTML(data.notice)}</div>`:"";
     $("#daily-digest").innerHTML=dailyItems.length?notice+dailyItems.map((item,index)=>{
       const scores=item.scores||{},connections=item.connections||[],access=item.pdf_url?"可尝试开放全文":"摘要深读",published=item.publication_date||item.year||"日期未知",authors=(item.authors||[]).slice(0,3).join("、")||"作者未知",venue=item.venue||item.source||"刊物未知";
@@ -586,8 +587,20 @@ async function loadDaily(force=false){
   }catch(err){$("#daily-digest").innerHTML=`<section class="daily-empty"><b>每日巡视暂时没有连上</b><p>你的知识库不受影响，稍后可以重试。</p><button class="secondary" id="retry-daily-direction">重新尝试</button><details><summary>查看技术信息</summary><small>${escapeHTML(err.message)}</small></details></section>`;const retry=$("#retry-daily-direction");if(retry)retry.onclick=()=>loadDaily(true)}
 }
 
+function frontierItemKey(item={}){
+  return String(item.url||`${item.title||""}|${item.year||item.publication_date||""}`).trim();
+}
+function markFrontierSeen(items=dailyItems){
+  const key=storageKey("frontierSeenUrls"),seen=new Set(JSON.parse(localStorage.getItem(key)||"[]"));
+  (items||[]).map(frontierItemKey).filter(Boolean).forEach(item=>seen.add(item));
+  localStorage.setItem(key,JSON.stringify([...seen].slice(-500)));
+  const badge=$("#frontier-unread-badge"),alert=$("#frontier-alert");
+  if(badge){badge.hidden=true;badge.textContent="0"}
+  if(alert)alert.hidden=true;
+}
 function updateFrontierAlert(items,data={}){
-  const unread=(items||[]).filter(item=>!item.read),badge=$("#frontier-unread-badge"),alert=$("#frontier-alert");
+  const seen=new Set(JSON.parse(localStorage.getItem(storageKey("frontierSeenUrls"))||"[]"));
+  const unread=(items||[]).filter(item=>{const key=frontierItemKey(item);return key&&!seen.has(key)}),badge=$("#frontier-unread-badge"),alert=$("#frontier-alert");
   badge.hidden=!unread.length;badge.textContent=String(unread.length);
   alert.hidden=!unread.length;
   if(!unread.length)return;

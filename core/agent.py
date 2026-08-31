@@ -396,7 +396,17 @@ def daily_digest(store: GardenStore, force: bool = False) -> dict[str, Any]:
     # Never pin an empty transient failure for the whole day. Successful
     # recommendations may use the daily profile cache normally.
     if not force and cached.get("signature") == profile_signature and cached.get("items"):
-        return cached
+        # Reading state changes independently from the daily recommendation
+        # cache. Overlay it on every response so a just-read paper does not
+        # reappear as unread until tomorrow's feed is rebuilt.
+        read_urls = set(store.setting("frontier_read_urls", []) or [])
+        return {
+            **cached,
+            "items": [
+                {**item, "read": item.get("url") in read_urls}
+                for item in cached.get("items", [])
+            ],
+        }
     if not priorities:
         result = {
             "signature": profile_signature, "date": today, "level": level, "interests": [], "items": [],
