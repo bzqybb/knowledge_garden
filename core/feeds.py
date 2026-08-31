@@ -9,9 +9,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from core.storage import GardenStore
@@ -317,9 +319,15 @@ def fetch_source(url: str, *, limit: int = 8, name: str = "") -> list[dict[str, 
 
 
 def refresh_feeds(store: GardenStore) -> dict[str, Any]:
+    started_at = perf_counter()
     fetched = added = 0
     errors: list[str] = []
     sources: list[dict[str, Any]] = []
+    known_source_urls = {
+        str(note.get("source_url") or "").strip()
+        for note in store.list_notes(limit=5000)
+        if str(note.get("source_url") or "").strip()
+    }
     for feed in store.list_feeds():
         if not feed["enabled"]:
             continue
@@ -329,12 +337,16 @@ def refresh_feeds(store: GardenStore) -> dict[str, Any]:
             entries = fetch_source(feed["url"], name=feed["name"])
             parsed_videos = 0
             if descriptor["platform"] == "bilibili":
-                # Keep the hourly patrol light: automatically inspect only the
-                # two newest videos. Older items remain available for explicit
-                # subtitle/ASR reading from the frontier page.
+                # Subtitle discovery is the slow part (2-3 network requests per
+                # video). Never repeat it for entries already in the garden.
                 from core.bilibili_mcp import inspect_public_video
 
-                for entry in entries[:2]:
+                new_entries = [
+                    entry for entry in entries
+                    if str(entry.get("url") or "").strip() not in known_source_urls
+                ][:2]
+
+                def inspect(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
                     try:
                         inspection = inspect_public_video(str(entry.get("url") or ""))
                     except Exception as exc:
@@ -342,15 +354,25 @@ def refresh_feeds(store: GardenStore) -> dict[str, Any]:
                             "status": "unavailable",
                             "message": f"公开字幕检查失败：{exc.__class__.__name__}",
                         }
-                    entry["content_status"] = str(inspection.get("status") or "unavailable")
-                    entry["content_status_message"] = str(inspection.get("message") or "")
-                    if inspection.get("status") == "ready" and inspection.get("transcript"):
-                        entry["transcript"] = str(inspection["transcript"])
-                        entry["data_source"] = str(inspection.get("data_source") or "public_subtitle")
-                        parsed_videos += 1
+                    return entry, inspection
+
+                # The two independent videos can be checked together. Writes
+                # remain on this thread so SQLite and Vault updates stay simple.
+                with ThreadPoolExecutor(max_workers=max(1, len(new_entries))) as pool:
+                    futures = [pool.submit(inspect, entry) for entry in new_entries]
+                    for future in as_completed(futures):
+                        entry, inspection = future.result()
+                        entry["content_status"] = str(inspection.get("status") or "unavailable")
+                        entry["content_status_message"] = str(inspection.get("message") or "")
+                        if inspection.get("status") == "ready" and inspection.get("transcript"):
+                            entry["transcript"] = str(inspection["transcript"])
+                            entry["data_source"] = str(inspection.get("data_source") or "public_subtitle")
+                            parsed_videos += 1
             fetched += len(entries)
             for entry in entries:
                 key = entry["url"] or entry["title"]
+                if str(entry.get("url") or "").strip() in known_source_urls:
+                    continue
                 status = str(entry.get("content_status") or "")
                 status_message = str(entry.get("content_status_message") or "")
                 transcript = str(entry.get("transcript") or "").strip()
@@ -397,6 +419,8 @@ def refresh_feeds(store: GardenStore) -> dict[str, Any]:
                     note_id, changed = store.upsert_note(note_payload)
                 added += int(changed)
                 source_added += int(changed)
+                if str(entry.get("url") or "").strip():
+                    known_source_urls.add(str(entry["url"]).strip())
                 if changed:
                     store.add_task(
                         f"前沿待嫁接：{entry['title']}", "frontier", entry["title"],
@@ -411,6 +435,7 @@ def refresh_feeds(store: GardenStore) -> dict[str, Any]:
                 "id": feed["id"], "name": feed["name"], "platform": descriptor["platform"],
                 "platform_label": descriptor["platform_label"], "status": "ok",
                 "fetched": len(entries), "added": source_added, "parsed_videos": parsed_videos,
+                "subtitle_checks": len(new_entries) if descriptor["platform"] == "bilibili" else 0,
             })
         except Exception as exc:
             message = f"{feed['name']}：{exc}"
@@ -419,4 +444,7 @@ def refresh_feeds(store: GardenStore) -> dict[str, Any]:
                 "id": feed["id"], "name": feed["name"], "status": "error", "error": str(exc),
             })
     store.add_activity("refresh_feeds", f"发现 {added} 篇新内容", min(added * 2, 20))
-    return {"fetched": fetched, "added": added, "errors": errors, "sources": sources}
+    return {
+        "fetched": fetched, "added": added, "errors": errors, "sources": sources,
+        "elapsed_seconds": round(perf_counter() - started_at, 2),
+    }

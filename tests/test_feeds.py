@@ -129,6 +129,21 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(len(self.store.list_tasks()), 1)
         self.assertIsNotNone(list_followed_sources(self.store)[0]["last_checked_at"])
 
+    def test_refresh_does_not_repeat_subtitle_inspection_for_known_video(self) -> None:
+        self.store.add_feed("测试博主", "https://space.bilibili.com/42")
+        with (
+            patch("core.feeds._fetch_bytes", return_value=BILIBILI_PAGE.encode("utf-8")),
+            patch("core.bilibili_mcp.inspect_public_video", return_value={
+                "status": "no_subtitle", "message": "没有公开字幕",
+            }) as inspect,
+        ):
+            first = refresh_feeds(self.store)
+            second = refresh_feeds(self.store)
+        self.assertEqual(inspect.call_count, 1)
+        self.assertEqual(first["sources"][0]["subtitle_checks"], 1)
+        self.assertEqual(second["sources"][0]["subtitle_checks"], 0)
+        self.assertIn("elapsed_seconds", second)
+
     def test_vault_raw_frontier_entries_are_visible_without_breaking_directory_taxonomy(self) -> None:
         vault = Path(self.temp.name) / "vault"
         vault.mkdir()

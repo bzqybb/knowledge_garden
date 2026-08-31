@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from core.bilibili_mcp import _video_analysis, inspect_public_video, read_video, runtime_status
+from core.bilibili_mcp import _video_analysis, analyze_video_transcript, inspect_public_video, read_video, runtime_status
 from core.paper_reader import _connect_local_knowledge, deep_read_paper
 from core.storage import GardenStore
 from core.transcript import split_timestamped_text
@@ -78,6 +78,32 @@ class BilibiliMCPAdapterTests(unittest.TestCase):
         self.assertEqual(result["data_source"], "public_subtitle")
         self.assertIn("[00:00:01 --> 00:00:04] 第一句", result["transcript"])
         self.assertIn("[00:01:05 --> 00:01:10] 第二句", result["transcript"])
+
+    def test_video_read_can_return_transcript_before_deep_analysis(self) -> None:
+        transcript = "[00:00:01 --> 00:00:05] 这是可先展示的完整字幕。" * 5
+        with (
+            patch("core.bilibili_mcp.inspect_public_video", return_value={
+                "status": "ready", "transcript": transcript, "data_source": "public_subtitle",
+                "source_url": "https://www.bilibili.com/video/BV1owner0000",
+                "metadata": {"title": "分阶段视频"},
+            }),
+            patch("core.bilibili_mcp._video_analysis") as analysis,
+        ):
+            result = read_video(self.store, "BV1owner0000", analyze=False)
+        analysis.assert_not_called()
+        self.assertTrue(result["analysis_deferred"])
+        self.assertEqual(result["transcript"], transcript)
+        with patch("core.bilibili_mcp._video_analysis", return_value={
+            "overview": "完成导读。", "key_points": [], "concepts": [], "caveats": [],
+            "chapter_outline": [], "questions": [],
+        }):
+            guided = analyze_video_transcript(
+                self.store, bvid_or_url=result["bvid"], title=result["title"],
+                source_url=result["source_url"], data_source=result["data_source"],
+                transcript=result["transcript"],
+            )
+        self.assertFalse(guided["analysis_deferred"])
+        self.assertEqual(guided["analysis"]["overview"], "完成导读。")
 
     def test_long_video_analysis_covers_late_timestamped_chunks(self) -> None:
         early = "\n".join(

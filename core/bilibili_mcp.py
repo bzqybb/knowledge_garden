@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
@@ -372,7 +373,7 @@ def _video_analysis(title: str, transcript: str, data_source: str) -> dict[str, 
     partials: list[dict[str, Any]] = []
     failed_chunks = 0
     generation_errors: list[str] = []
-    for index, chunk in enumerate(chunks):
+    def analyze_chunk(index: int, chunk: str) -> tuple[int, dict[str, Any] | None, str]:
         try:
             result = chat_json(
                 "你是严谨的视频学术导读编辑。只根据提供的字幕/ASR转录分析，不把UP主观点自动当作事实。只返回JSON。关键点必须保留对应时间戳和短原话；无法从转录确认时明确写入caveats。当前输入是完整视频按时间顺序切分的一块，不得假装看过其他块。",
@@ -387,9 +388,21 @@ def _video_analysis(title: str, transcript: str, data_source: str) -> dict[str, 
                 max_retries=1,
             )
         except LLMError as exc:
-            generation_errors.append(str(exc))
-            result = None
-        if isinstance(result, dict):
+            return index, None, str(exc)
+        return index, result if isinstance(result, dict) else None, ""
+
+    analyzed: list[tuple[int, dict[str, Any] | None, str]] = []
+    # Long videos used to wait for every GLM chunk serially. At most three
+    # independent chunks now run together to preserve coverage without making
+    # latency grow linearly with video length.
+    with ThreadPoolExecutor(max_workers=min(3, len(chunks))) as pool:
+        futures = [pool.submit(analyze_chunk, index, chunk) for index, chunk in enumerate(chunks)]
+        for future in as_completed(futures):
+            analyzed.append(future.result())
+    for _, result, error in sorted(analyzed, key=lambda item: item[0]):
+        if error:
+            generation_errors.append(error)
+        if result is not None:
             partials.append({key: result.get(key, fallback[key]) for key in fallback})
         else:
             failed_chunks += 1
@@ -524,9 +537,67 @@ def _analysis_markdown(analysis: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+def _save_video_note(
+    store: GardenStore, *, bvid: str, page: int, title: str, source_url: str,
+    data_source: str, transcript_text: str, analysis: dict[str, Any],
+) -> int:
+    content = "\n\n".join([
+        f"> 视频来源：{source_url}",
+        f"> 内容依据：{data_source}；AI字幕和ASR都可能识别错误，关键表述应回到时间戳核对。",
+        _analysis_markdown(analysis),
+        "## 带时间戳的转录\n" + (transcript_text or "未取得可用字幕。"),
+    ])
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    note_id, _ = store.upsert_note({
+        "path": f"bilibili::{bvid}::p{max(1, int(page))}",
+        "title": title,
+        "kind": "frontier",
+        "content": content,
+        "tags": ["前沿", "B站", "视频解析", data_source],
+        "source": "Bilibili MCP",
+        "source_url": source_url,
+        "content_hash": digest,
+    })
+    return note_id
+
+
+def analyze_video_transcript(
+    store: GardenStore, *, bvid_or_url: str, title: str, source_url: str,
+    data_source: str, transcript: str, page: int = 1,
+) -> dict[str, Any]:
+    match = _BVID.search(str(bvid_or_url or source_url or ""))
+    if not match:
+        raise ValueError("请输入有效的 B站 BV 号或视频链接")
+    transcript_text = str(transcript or "").strip()
+    if not transcript_text:
+        raise ValueError("没有可供导读的字幕")
+    if len(transcript_text) > 3_000_000:
+        raise ValueError("字幕内容过长，暂时无法生成导读")
+    bvid = match.group(1)
+    started_at = time.perf_counter()
+    analysis = _video_analysis(str(title or bvid), transcript_text, str(data_source or "subtitle"))
+    analysis_seconds = round(time.perf_counter() - started_at, 2)
+    resolved_url = str(source_url or f"https://www.bilibili.com/video/{bvid}")
+    note_id = _save_video_note(
+        store, bvid=bvid, page=page, title=str(title or bvid), source_url=resolved_url,
+        data_source=str(data_source or "subtitle"), transcript_text=transcript_text,
+        analysis=analysis,
+    )
+    store.add_activity("bilibili_read", str(title or bvid)[:100], 4)
+    return {
+        "bvid": bvid, "title": str(title or bvid), "source_url": resolved_url,
+        "data_source": str(data_source or "subtitle"), "transcript": transcript_text,
+        "analysis": analysis, "analysis_generation_failed": bool(analysis.get("generation_failed")),
+        "analysis_generation_error": str(analysis.get("generation_error") or ""),
+        "analysis_seconds": analysis_seconds, "note_id": note_id, "analysis_deferred": False,
+    }
+
+
 def read_video(
     store: GardenStore, bvid_or_url: str, *, allow_asr: bool = False, page: int = 1,
+    analyze: bool = True,
 ) -> dict[str, Any]:
+    started_at = time.perf_counter()
     match = _BVID.search(str(bvid_or_url or ""))
     if not match:
         raise ValueError("请输入有效的 B站 BV 号或视频链接")
@@ -541,7 +612,9 @@ def read_video(
         transcript = public_result
     else:
         try:
-            metadata = call_tool("get_video_metadata", {"bvid_or_url": bvid}, timeout=30)
+            metadata = public_result.get("metadata") or {}
+            if not metadata:
+                metadata = call_tool("get_video_metadata", {"bvid_or_url": bvid}, timeout=30)
             transcript = call_tool(
                 "get_video_transcript",
                 {
@@ -570,38 +643,42 @@ def read_video(
     ).strip()
     data_source = str(transcript.get("data_source") or "subtitle")
     title = str(metadata.get("title") or transcript.get("title") or bvid)
-    analysis = _video_analysis(title, transcript_text, data_source)
     source_url = str(transcript.get("source_url") or f"https://www.bilibili.com/video/{bvid}")
-    content = "\n\n".join([
-        f"> 视频来源：{source_url}",
-        f"> 内容依据：{data_source}；AI字幕和ASR都可能识别错误，关键表述应回到时间戳核对。",
-        _analysis_markdown(analysis),
-        "## 带时间戳的转录\n" + (transcript_text or "未取得可用字幕。"),
-    ])
-    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    note_id, _ = store.upsert_note({
-        "path": f"bilibili::{bvid}::p{max(1, int(page))}",
-        "title": title,
-        "kind": "frontier",
-        "content": content,
-        "tags": ["前沿", "B站", "视频解析", data_source],
-        "source": "Bilibili MCP",
-        "source_url": source_url,
-        "content_hash": digest,
-    })
-    store.add_activity("bilibili_read", title[:100], 4)
+    transcript_seconds = round(time.perf_counter() - started_at, 2)
+    if analyze:
+        result = analyze_video_transcript(
+            store, bvid_or_url=bvid, title=title, source_url=source_url,
+            data_source=data_source, transcript=transcript_text, page=page,
+        )
+        result.update({
+            "metadata": metadata, "asr_used": data_source == "asr",
+            "transcript_seconds": transcript_seconds,
+            "total_seconds": round(time.perf_counter() - started_at, 2),
+        })
+        return result
+    pending_analysis = {
+        "overview": "字幕已取得，GLM 深度导读正在生成。",
+        "key_points": [], "concepts": [], "caveats": [], "chapter_outline": [], "questions": [],
+    }
+    note_id = _save_video_note(
+        store, bvid=bvid, page=page, title=title, source_url=source_url,
+        data_source=data_source, transcript_text=transcript_text, analysis=pending_analysis,
+    )
     return {
         "bvid": bvid,
         "title": title,
         "source_url": source_url,
         "data_source": data_source,
         "transcript": transcript_text,
-        "analysis": analysis,
-        "analysis_generation_failed": bool(analysis.get("generation_failed")),
-        "analysis_generation_error": str(analysis.get("generation_error") or ""),
+        "analysis": pending_analysis,
+        "analysis_generation_failed": False,
+        "analysis_generation_error": "",
         "metadata": metadata,
         "note_id": note_id,
         "asr_used": data_source == "asr",
+        "analysis_deferred": True,
+        "transcript_seconds": transcript_seconds,
+        "total_seconds": round(time.perf_counter() - started_at, 2),
     }
 
 

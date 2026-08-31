@@ -653,7 +653,7 @@ $("#review-form").onsubmit=async e=>{e.preventDefault();if(!activeReviewTask)ret
 
 async function loadFrontierNotes() {
   try { const data = await api("/api/notes?kind=frontier"); const notes = data.notes.slice(0,8); window.frontierNotes = notes;
-    $("#frontier-notes").innerHTML = notes.length ? notes.map((n,i) => {const bili=/bilibili\.com\/video\/BV/i.test(n.source_url||""),parsed=(n.tags||[]).includes("字幕已解析"),metadataOnly=(n.tags||[]).includes("仅元数据"),status=parsed?"已解析公开字幕":metadataOnly?"当前仅元数据":"等待阅读全文";return `<div class="source-item"><div><b>${escapeHTML(n.title)}</b><small>${escapeHTML(n.source)} · ${escapeHTML(status)} · ${escapeHTML(excerpt(n.content,55))}</small></div><div class="source-actions">${bili?`<button class="primary" onclick="readBilibili(${i},false)">${parsed?"重新解析":"解析字幕"}</button><button onclick="readBilibili(${i},true)">无字幕时ASR</button>`:""}<button onclick="useFrontier(${i})">生成卡片</button></div></div>`}).join("") : '<div class="empty">刷新关注源后，新文章会出现在这里。</div>';
+    $("#frontier-notes").innerHTML = notes.length ? notes.map((n,i) => {const bili=/bilibili\.com\/video\/BV/i.test(n.source_url||""),parsed=(n.tags||[]).includes("字幕已解析"),metadataOnly=(n.tags||[]).includes("仅元数据"),status=parsed?"已解析公开字幕":metadataOnly?"当前仅元数据":"等待阅读全文";return `<div class="source-item"><div><b>${escapeHTML(n.title)}</b><small>${escapeHTML(n.source)} · ${escapeHTML(status)} · ${escapeHTML(excerpt(n.content,55))}</small></div><div class="source-actions">${bili?`<button class="primary" onclick="readBilibili(${i},true)">${parsed?"重新解析视频":"解析视频"}</button>`:""}<button onclick="useFrontier(${i})">生成卡片</button></div></div>`}).join("") : '<div class="empty">刷新关注源后，新文章会出现在这里。</div>';
   } catch(e) { toast(e.message,true); }
 }
 window.useFrontier = (index) => { const n = window.frontierNotes[index]; $("#frontier-title").value=n.title; $("#frontier-url").value=n.source_url||""; $("#frontier-text").value=n.content; $("#analyze-form").scrollIntoView({behavior:"smooth"}); };
@@ -669,7 +669,29 @@ function formatVideoAnalysis(analysis,result){
   lines.push("",`## 转录（${r.data_source||"未知来源"}）`,String(r.transcript||""));
   return lines.join("\n");
 }
-window.readBilibili = async (index,allowAsr=false) => {if(isPublicMode){toast("B站字幕与 ASR 需桌面连接器；请将字幕粘贴到材料框测试导读。",true);return}const n=window.frontierNotes[index];if(!n)return;busy(true,allowAsr?"正在读取字幕；若确认没有字幕，将调用本地ASR……":"正在读取公开视频字幕；必要时再检查本地授权……");try{const data=await api("/api/bilibili/video/read",{method:"POST",body:JSON.stringify({url:n.source_url,allow_asr:allowAsr})}),r=data.result||{},a=r.analysis||{};n.title=r.title||n.title;n.content=formatVideoAnalysis(a,r);$("#frontier-title").value=n.title;$("#frontier-url").value=r.source_url||n.source_url;$("#frontier-text").value=n.content;$("#analyze-form").scrollIntoView({behavior:"smooth"});const sourceLabels={asr:"本地ASR",ai_subtitle:"B站AI字幕",public_ai_subtitle:"公开AI字幕",public_subtitle:"公开人工字幕",subtitle:"授权字幕"};toast(`视频已解析：${sourceLabels[r.data_source]||r.data_source||"字幕"}，导读与完整转录都已填入，可继续提炼概念`);await loadFrontierNotes()}catch(err){toast(err.message,true);await loadBilibiliMcpStatus()}finally{busy(false)}};
+window.readBilibili = async (index,allowAsr=false) => {
+  if(isPublicMode){toast("B站字幕与 ASR 需桌面连接器；请将字幕粘贴到材料框测试导读。",true);return}
+  const n=window.frontierNotes[index];if(!n)return;
+  let transcriptReady=false,pendingContent="";
+  busy(true,allowAsr?"第一步：读取字幕；确认无字幕后才调用本地 ASR……":"第一步：正在读取公开视频字幕……");
+  try{
+    const data=await api("/api/bilibili/video/read",{method:"POST",body:JSON.stringify({url:n.source_url,allow_asr:allowAsr,analyze:false})}),r=data.result||{};
+    n.title=r.title||n.title;n.content=formatVideoAnalysis(r.analysis||{},r);
+    transcriptReady=true;pendingContent=n.content;
+    $("#frontier-title").value=n.title;$("#frontier-url").value=r.source_url||n.source_url;$("#frontier-text").value=n.content;
+    $("#analyze-form").scrollIntoView({behavior:"smooth"});busy(false);
+    const sourceLabels={asr:"本地ASR",ai_subtitle:"B站AI字幕",public_ai_subtitle:"公开AI字幕",public_subtitle:"公开人工字幕",subtitle:"授权字幕"};
+    toast(`字幕已提取（${r.transcript_seconds??"?"} 秒），GLM 深度导读正在继续生成；你可以先查看完整字幕`);
+    const guideData=await api("/api/bilibili/video/analyze",{method:"POST",body:JSON.stringify({
+      url:r.source_url||n.source_url,bvid:r.bvid,title:r.title||n.title,source_url:r.source_url||n.source_url,
+      data_source:r.data_source,transcript:r.transcript
+    })}),guide=guideData.result||{};
+    n.content=formatVideoAnalysis(guide.analysis||{},guide);
+    if($("#frontier-text").value===pendingContent)$("#frontier-text").value=n.content;
+    toast(`GLM 深度导读已完成（${guide.analysis_seconds??"?"} 秒），依据：${sourceLabels[guide.data_source]||guide.data_source||"字幕"}`);
+    await loadFrontierNotes();
+  }catch(err){busy(false);toast(transcriptReady?`字幕已保留；GLM 深度导读生成失败：${err.message}`:err.message,true);if(!transcriptReady)await loadBilibiliMcpStatus()}
+};
 
 async function loadGarden() {
   try { const [mindmap, graph, tasks] = await Promise.all([api("/api/mindmap"),api("/api/graph"),api("/api/tasks")]); graphData=graph; drawMindmap(mindmap); renderTasks("#all-tasks",tasks.tasks); } catch(e){toast(e.message,true)}

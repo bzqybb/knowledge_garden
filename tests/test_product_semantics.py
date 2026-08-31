@@ -65,7 +65,20 @@ class ProductSemanticsTests(unittest.TestCase):
             self.assertIn(field, formatter)
         self.assertIn("r.transcript", formatter)
         self.assertNotRegex(formatter, r"r\.transcript\.(?:slice|substring)\(")
-        self.assertIn("n.content=formatVideoAnalysis(a,r)", source)
+        self.assertIn("n.content=formatVideoAnalysis", source)
+
+    def test_bilibili_transcript_is_displayed_before_deep_guide_finishes(self):
+        source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        start = source.index("window.readBilibili")
+        body = source[start:source.index("async function loadGarden", start)]
+        self.assertIn("analyze:false", body)
+        self.assertIn('api("/api/bilibili/video/analyze"', body)
+        self.assertLess(body.index('$("#frontier-text").value=n.content'), body.index('/api/bilibili/video/analyze'))
+
+    def test_bilibili_uses_one_subtitle_first_asr_fallback_action(self):
+        source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('onclick="readBilibili(${i},true)"', source)
+        self.assertNotIn("无字幕时ASR</button>", source)
 
     def test_frontier_badge_tracks_unseen_feed_items_not_manual_read_state(self):
         source = (ROOT / "web" / "app.js").read_text(encoding="utf-8")

@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from core.agent import answer_from_wiki, briefing, daily_digest, hint_for_task, patrol_vault, reanswer_with_feedback, save_agent_insight, update_agents_manifest
-from core.bilibili_mcp import read_video as read_bilibili_video, runtime_status as bilibili_mcp_status
+from core.bilibili_mcp import analyze_video_transcript, read_video as read_bilibili_video, runtime_status as bilibili_mcp_status
 from core.beta_access import (
     BetaAccessError,
     beta_authenticate,
@@ -1327,7 +1327,7 @@ class GardenHandler(BaseHTTPRequestHandler):
                 })
             elif path == "/api/feeds/refresh":
                 result = refresh_feeds(STORE)
-                result["sync"] = sync_configured_vault()
+                result["sync"] = {"deferred": True}
                 self._json({"ok": True, "result": result})
             elif path == "/api/bilibili/video/read":
                 result = read_bilibili_video(
@@ -1335,8 +1335,21 @@ class GardenHandler(BaseHTTPRequestHandler):
                     str(body.get("url") or body.get("bvid") or ""),
                     allow_asr=bool(body.get("allow_asr")),
                     page=int(body.get("page") or 1),
+                    analyze=bool(body.get("analyze", True)),
                 )
-                result["sync"] = sync_configured_vault()
+                result["sync"] = {"deferred": True}
+                self._json({"ok": True, "result": result})
+            elif path == "/api/bilibili/video/analyze":
+                result = analyze_video_transcript(
+                    STORE,
+                    bvid_or_url=str(body.get("url") or body.get("bvid") or ""),
+                    title=str(body.get("title") or ""),
+                    source_url=str(body.get("source_url") or body.get("url") or ""),
+                    data_source=str(body.get("data_source") or "subtitle"),
+                    transcript=str(body.get("transcript") or ""),
+                    page=int(body.get("page") or 1),
+                )
+                result["sync"] = {"deferred": True}
                 self._json({"ok": True, "result": result})
             else:
                 self._json({"error": "接口不存在"}, 404)
